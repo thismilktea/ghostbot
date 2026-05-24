@@ -137,8 +137,10 @@ class ContextBuilder:
         channel: str | None = None,
         project: "ProjectState | None" = None,
         priority_bucket: dict[str, float] | None = None,
+        session: "ProjectState | None" = None,
     ) -> str:
         """Build the system prompt from identity, bootstrap files, memory, skills, and working-set context."""
+        project = project or session
         parts = [self._get_identity(channel=channel)]
 
         bootstrap = self._load_bootstrap_files()
@@ -265,8 +267,10 @@ class ContextBuilder:
         session_metadata: dict | None = None,
         project: "ProjectState | None" = None,
         priority_bucket: dict[str, float] | None = None,
+        session: "ProjectState | None" = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
+        project = project or session
         runtime_ctx = self._build_runtime_context(
             channel,
             chat_id,

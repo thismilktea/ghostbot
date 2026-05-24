@@ -38,6 +38,34 @@ from loguru import logger
 
 # ghostbot/agent/memory.py
 
+class QueryEnhancer:
+    """LLM-backed query expansion for retrieval evaluation and memory search."""
+
+    def __init__(self, provider: LLMProvider, model: str):
+        self.provider = provider
+        self.model = model
+
+    async def expand(self, query: str) -> str:
+        if not query.strip():
+            return ""
+
+        prompt = (
+            "Expand this retrieval query with concise related keywords, identifiers, and likely synonyms. "
+            "Return only the expanded query text, no explanation.\n\n"
+            f"Query: {query}"
+        )
+        try:
+            response = await self.provider.chat_with_retry(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            expanded = (response.content if response else "").strip()
+        except Exception as e:
+            logger.warning(f"⚠️ 查询扩展失败: {e}")
+            return query
+        return f"{query} {expanded}" if expanded and query not in expanded else (expanded or query)
+
+
 class ResultReranker:
     """精排器：利用小模型对粗召回结果进行语义校准"""
 

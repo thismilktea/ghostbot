@@ -113,6 +113,11 @@ async def cmd_use(ctx: CommandContext) -> OutboundMessage:
         project.metadata["active_project_path"] = project_path
     ctx.loop.projects.save(project)
     ctx.loop.projects.set_active_for_origin(ctx.loop._origin_key(ctx.msg), project.key)
+    legacy = ctx.loop.sessions.get_or_create(ctx.loop._origin_key(ctx.msg))
+    legacy.metadata["active_project"] = project_name
+    if project_path:
+        legacy.metadata["active_project_path"] = project_path
+    ctx.loop.sessions.save(legacy)
 
     path_note = f" 路径: `{project_path}`" if project_path else ""
 
@@ -560,8 +565,12 @@ async def cmd_plan_load(ctx: CommandContext) -> OutboundMessage:
         return OutboundMessage(channel=ctx.msg.channel, chat_id=ctx.msg.chat_id, content=f"无法加载计划 `{arg}`。", metadata={"render_as": "text"})
     plan.reset_for_loading()
     plan.save_to_session(session)
-    ctx.loop.projects.save(session)
-    content = "已将计划加载到当前项目。\n\n" + ctx.loop._format_plan_response(plan)
+    if getattr(session, "kind", "session") == "project":
+        ctx.loop.projects.save(session)
+        content = "已将计划加载到当前项目。\n\n" + ctx.loop._format_plan_response(plan)
+    else:
+        ctx.loop.sessions.save(session)
+        content = "已将计划加载到当前会话。\n\n" + ctx.loop._format_plan_response(plan)
     return OutboundMessage(channel=ctx.msg.channel, chat_id=ctx.msg.chat_id, content=content, metadata={"render_as": "text"})
 
 

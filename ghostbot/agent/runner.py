@@ -75,6 +75,7 @@ class AgentRunSpec:
     fail_on_tool_error: bool = False
     workspace: Path | None = None
     project_key: str | None = None
+    session_key: str | None = None
     context_window_tokens: int | None = None
     context_block_limit: int | None = None
     provider_retry_mode: str = "standard"
@@ -715,7 +716,7 @@ class AgentRunner:
                 params=params,
                 workspace=spec.workspace,
                 mode=spec.mode,
-                session_key=spec.project_key,
+                session_key=spec.project_key or spec.session_key,
                 tool_read_only=bool(getattr(tool, "read_only", False)),
                 side_effect_level=str(getattr(tool, "side_effect_level", "unknown")),
                 risk_tags=frozenset(getattr(tool, "risk_tags", frozenset())),
@@ -891,7 +892,7 @@ class AgentRunner:
         try:
             content = maybe_persist_tool_result(
                 spec.workspace,
-                spec.project_key,
+                spec.project_key or spec.session_key,
                 tool_call_id,
                 result,
                 max_chars=spec.max_tool_result_chars,
