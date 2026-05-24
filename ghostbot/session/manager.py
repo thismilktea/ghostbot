@@ -15,7 +15,7 @@ from ghostbot.utils.helpers import ensure_dir, find_legal_message_start, safe_fi
 
 
 def _normalize_active_file_path(path: str, workspace: Path) -> str | None:
-    raw = (path or "").strip()
+    raw = (path or "").strip().replace("\\", "/")
     if not raw:
         return None
     candidate = Path(raw).expanduser()
