@@ -1,0 +1,13 @@
+{
+  "iterations": [
+    {
+      "iteration": 0,
+      "usage": {},
+      "tool_calls": [],
+      "tool_events": [],
+      "final_content": "Error: Your request was blocked.",
+      "stop_reason": "error",
+      "error": "Error: Your request was blocked."
+    }
+  ]
+}

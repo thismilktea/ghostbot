@@ -18,6 +18,7 @@ from ghostbot.agent.autocompact import AutoCompact
 from ghostbot.agent.context import ContextBuilder
 from ghostbot.agent.hook import AgentHook, AgentHookContext, CompositeHook
 from ghostbot.agent.memory import Consolidator, Dream
+from ghostbot.agent.planning_workflow import PlanningWorkflow
 from ghostbot.agent.planning import (
     PlanQualityResult,
     PlanState,
@@ -37,6 +38,13 @@ from ghostbot.agent.planning import (
 from ghostbot.agent.policy import PolicyContext, PolicyEngine
 from ghostbot.agent.runner import _MAX_INJECTIONS_PER_TURN, AgentRunSpec, AgentRunner
 from ghostbot.agent.subagent import SubagentManager
+from ghostbot.agent.tools.code_graph import (
+    FindCalleesTool,
+    FindCallersTool,
+    FindImpactedFilesTool,
+    FindRelatedFilesTool,
+    FindSymbolTool,
+)
 from ghostbot.agent.tools.cron import CronTool
 from ghostbot.agent.skills import BUILTIN_SKILLS_DIR
 from ghostbot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -55,6 +63,7 @@ from ghostbot.providers.base import LLMProvider
 from ghostbot.project import DEFAULT_PROJECT_ID, ProjectManager, ProjectState
 from ghostbot.session.manager import SessionManager
 from ghostbot.utils.helpers import estimate_prompt_tokens_chain, image_placeholder_text, truncate_text as truncate_text_fn
+from ghostbot.utils.project_analyzer import ProjectAnalyzer
 from ghostbot.utils.prompt_templates import render_template
 from ghostbot.utils.progress import extract_plan_progress
 from ghostbot.utils.runtime import EMPTY_FINAL_RESPONSE_MESSAGE
@@ -237,6 +246,8 @@ class AgentLoop:
             workspace=workspace,
             bus=bus,
             model=self.model,
+            fast_model=self.fast_model,
+            strong_model=self.model,
             web_config=self.web_config,
             max_tool_result_chars=self.max_tool_result_chars,
             exec_config=self.exec_config,
@@ -285,7 +296,7 @@ class AgentLoop:
     def _allowed_tool_names(self) -> set[str] | None:
         if not self.coding_config.enable:
             return None
-        allowed = {"read_file", "list_dir", "glob", "grep"}
+        allowed = {"read_file", "list_dir", "glob", "grep", "find_symbol", "find_callers", "find_callees", "find_related_files", "find_impacted_files"}
         if self.coding_config.allow_write:
             allowed.update({"write_file", "edit_file", "notebook_edit"})
         if self.coding_config.allow_exec:
@@ -317,7 +328,20 @@ class AgentLoop:
         for cls in (WriteFileTool, EditFileTool, ListDirTool):
             self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
         for cls in (GlobTool, GrepTool):
-            self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
+            self.tools.register(
+                cls(
+                    workspace=self.workspace,
+                    allowed_dir=allowed_dir,
+                    priority_bucket_provider=lambda: self._priority_bucket(),
+                )
+            )
+        for cls in (FindSymbolTool, FindCallersTool, FindCalleesTool, FindRelatedFilesTool, FindImpactedFilesTool):
+            self.tools.register(
+                cls(
+                    workspace=self.workspace,
+                    project_graph_provider=lambda: self._active_project_graph_info(),
+                )
+            )
         self.tools.register(NotebookEditTool(workspace=self.workspace, allowed_dir=allowed_dir))
         if self.exec_config.enable:
             self.tools.register(
@@ -387,6 +411,107 @@ class AgentLoop:
         except Exception:
             return str(path)
 
+    def _active_project_graph_info(self, project: ProjectState | None = None) -> dict[str, str]:
+        if project is None:
+            default_active = self.projects.get_active_for_origin("default")
+            project = self.projects.get_or_create(default_active or DEFAULT_PROJECT_ID)
+        project_path = project.path or project.metadata.get("active_project_path")
+        graph_path = project.metadata.get("active_project_graph")
+        info: dict[str, str] = {}
+        if project_path:
+            info["project_path"] = str(project_path)
+        if graph_path:
+            info["graph_path"] = str(graph_path)
+        return info
+
+    def _project_analyzer(self, project: ProjectState | None = None) -> ProjectAnalyzer | None:
+        info = self._active_project_graph_info(project)
+        project_path = info.get("project_path")
+        graph_path = info.get("graph_path")
+        if not project_path or not graph_path:
+            return None
+        try:
+            analyzer = ProjectAnalyzer(Path(project_path), self.workspace / "memory")
+            analyzer.graph_file = Path(graph_path)
+            return analyzer
+        except Exception:
+            return None
+
+    def _context_impacted_files(self, project: ProjectState | None = None) -> dict[str, list[str]]:
+        analyzer = self._project_analyzer(project)
+        if analyzer is None or project is None or not project.active_files:
+            return {}
+
+        impacted: dict[str, list[str]] = {}
+        seen: set[str] = set()
+        active_paths = [path for path, _ in sorted(project.active_files.items(), key=lambda item: item[1], reverse=True)]
+        for active_path in active_paths[: self.context._MAX_WORKING_SET_FILES]:
+            for item in analyzer.find_impacted_files(active_path, limit=3):
+                file_path = str(item.get("file_path") or "").strip()
+                if not file_path or file_path in seen:
+                    continue
+                seen.add(file_path)
+                impacted[file_path] = [str(reason).strip() for reason in item.get("reasons", []) if str(reason).strip()]
+        return impacted
+
+    def _related_test_candidates(self, project: ProjectState | None = None) -> dict[str, list[str]]:
+        analyzer = self._project_analyzer(project)
+        if analyzer is None or project is None or not project.active_files:
+            return {}
+
+        candidates: dict[str, list[str]] = {}
+        seen: set[str] = set()
+        active_paths = [path for path, _ in sorted(project.active_files.items(), key=lambda item: item[1], reverse=True)]
+        for active_path in active_paths[: self.context._MAX_WORKING_SET_FILES]:
+            for item in analyzer.find_related_tests(active_path, limit=3):
+                file_path = str(item.get("file_path") or "").strip()
+                if not file_path or file_path in seen:
+                    continue
+                seen.add(file_path)
+                candidates[file_path] = [str(reason).strip() for reason in item.get("reasons", []) if str(reason).strip()]
+                if len(candidates) >= self.context._MAX_PRIORITY_BUCKET_FILES:
+                    return candidates
+        return candidates
+
+    def _priority_bucket(self, project: ProjectState | None = None) -> dict[str, float]:
+        if project is None:
+            default_active = self.projects.get_active_for_origin("default")
+            project = self.projects.get_or_create(default_active or DEFAULT_PROJECT_ID)
+        if project is None or not project.active_files:
+            return {}
+        analyzer = self._project_analyzer(project)
+        if analyzer is None:
+            return {}
+
+        bucket = analyzer.build_priority_bucket(project.active_files)
+        for index, (path, reasons) in enumerate(self._context_graph_neighbors(project).items()):
+            boost = max(1.0, 25.0 - index)
+            bucket[path] = max(bucket.get(path, 0.0), boost + float(len(reasons)))
+        for index, (path, reasons) in enumerate(self._context_impacted_files(project).items()):
+            boost = max(1.0, 35.0 - index)
+            bucket[path] = max(bucket.get(path, 0.0), boost + float(len(reasons)))
+        for index, (path, reasons) in enumerate(self._related_test_candidates(project).items()):
+            boost = max(1.0, 20.0 - index)
+            bucket[path] = max(bucket.get(path, 0.0), boost + float(len(reasons)))
+        return bucket
+
+    def _context_graph_neighbors(self, project: ProjectState | None = None) -> dict[str, list[str]]:
+        analyzer = self._project_analyzer(project)
+        if analyzer is None or project is None or not project.active_files:
+            return {}
+
+        neighbors: dict[str, list[str]] = {}
+        seen: set[str] = set()
+        active_paths = [path for path, _ in sorted(project.active_files.items(), key=lambda item: item[1], reverse=True)]
+        for active_path in active_paths[: self.context._MAX_WORKING_SET_FILES]:
+            for item in analyzer.find_related_files(active_path, limit=3):
+                file_path = str(item.get("file_path") or "").strip()
+                if not file_path or file_path in seen:
+                    continue
+                seen.add(file_path)
+                neighbors[file_path] = [str(reason).strip() for reason in item.get("reasons", []) if str(reason).strip()]
+        return neighbors
+
     def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
         """Update context for all tools that need routing info."""
         for name in ("message", "spawn", "cron"):
@@ -453,6 +578,9 @@ class AgentLoop:
             chat_id=chat_id,
             session_metadata=session.metadata if session else None,
             session=session,
+            graph_neighbors=self._context_graph_neighbors(session),
+            impacted_files=self._context_impacted_files(session),
+            related_tests=self._related_test_candidates(session),
         )
         result = await self.runner.run(AgentRunSpec(
             initial_messages=messages,
@@ -615,17 +743,37 @@ class AgentLoop:
         history = session.get_history(max_messages=0)
         execution_mode = detect_execution_mode(request)
         task_class = "code_change_small"
-        plan_text, tools_used = await self._run_planning_loop(
-            request=request,
-            history=history,
-            channel=channel,
-            chat_id=chat_id,
-            session_summary=session_summary,
-            revision_feedback=revision_feedback,
-            previous_plan=previous_plan.plan if previous_plan else None,
-            execution_mode=execution_mode,
-            session=session,
-        )
+
+        if previous_plan or revision_feedback:
+            plan_text, tools_used = await self._run_planning_loop(
+                request=request,
+                history=history,
+                channel=channel,
+                chat_id=chat_id,
+                session_summary=session_summary,
+                revision_feedback=revision_feedback,
+                previous_plan=previous_plan.plan if previous_plan else None,
+                execution_mode=execution_mode,
+                session=session,
+            )
+        else:
+            workflow = PlanningWorkflow(
+                loop=self,
+                session=session,
+                request=request,
+                history=history,
+                channel=channel,
+                chat_id=chat_id,
+                session_summary=session_summary,
+            )
+            plan_text, tools_used = await workflow.run()
+            session.metadata["planning_workflow"] = {
+                "phases": [
+                    {"name": phase.name, "tools_used": phase.tools_used}
+                    for phase in workflow.phases
+                ]
+            }
+
         min_steps = (
             self.planning_config.min_exploration_steps
             if self.planning_config.force_exploration and plan_requires_exploration(task_class)
@@ -794,6 +942,9 @@ class AgentLoop:
             )
         history = []
         execution_prompt = self._build_approved_execution_prompt(plan, execution_scope)
+        graph_neighbors = self._context_graph_neighbors(session)
+        impacted_files = self._context_impacted_files(session)
+        related_tests = self._related_test_candidates(session)
         initial_messages = self.context.build_messages(
             history=history,
             current_message=execution_prompt,
@@ -802,6 +953,9 @@ class AgentLoop:
             chat_id=msg.chat_id,
             session_metadata=session.metadata,
             session=session,
+            graph_neighbors=graph_neighbors,
+            impacted_files=impacted_files,
+            related_tests=related_tests,
         )
         try:
             estimate, source = estimate_prompt_tokens_chain(
@@ -958,6 +1112,9 @@ class AgentLoop:
         self.sessions.save(session)
 
         history = session.get_history(max_messages=0)
+        graph_neighbors = self._context_graph_neighbors(session)
+        impacted_files = self._context_impacted_files(session)
+        related_tests = self._related_test_candidates(session)
         initial_messages = self.context.build_messages(
             history=history,
             current_message="The pending tool approval has been resolved. Continue from the tool result.",
@@ -966,6 +1123,9 @@ class AgentLoop:
             chat_id=ctx.msg.chat_id,
             session_metadata=session.metadata,
             session=session,
+            graph_neighbors=graph_neighbors,
+            impacted_files=impacted_files,
+            related_tests=related_tests,
         )
         final_content, _, all_msgs, stop_reason, had_injections, next_pending = await self._run_agent_loop(
             initial_messages,
@@ -1085,6 +1245,8 @@ class AgentLoop:
                     pending_msg.channel,
                     pending_msg.chat_id,
                     self.context.timezone,
+                    session_metadata=session.metadata if session else None,
+                    project=session,
                 )
                 if isinstance(user_content, str):
                     merged: str | list[dict[str, Any]] = f"{runtime_ctx}\n\n{user_content}"
@@ -1340,6 +1502,9 @@ class AgentLoop:
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
             history = session.get_history(max_messages=0)
             current_role = "assistant" if msg.sender_id == "subagent" else "user"
+            graph_neighbors = self._context_graph_neighbors(session)
+            impacted_files = self._context_impacted_files(session)
+            related_tests = self._related_test_candidates(session)
 
             messages = self.context.build_messages(
                 history=history,
@@ -1348,6 +1513,9 @@ class AgentLoop:
                 current_role=current_role,
                 session_metadata=session.metadata,
                 session=session,
+                graph_neighbors=graph_neighbors,
+                impacted_files=impacted_files,
+                related_tests=related_tests,
             )
             final_content, _, all_msgs, _, _, _ = await self._run_agent_loop(
                 messages, session=session, channel=channel, chat_id=chat_id,
@@ -1415,6 +1583,9 @@ class AgentLoop:
                 message_tool.start_turn()
 
         history = session.get_history(max_messages=0)
+        graph_neighbors = self._context_graph_neighbors(session)
+        impacted_files = self._context_impacted_files(session)
+        related_tests = self._related_test_candidates(session)
 
         initial_messages = self.context.build_messages(
             history=history,
@@ -1425,6 +1596,9 @@ class AgentLoop:
             chat_id=msg.chat_id,
             session_metadata=session.metadata,
             session=session,
+            graph_neighbors=graph_neighbors,
+            impacted_files=impacted_files,
+            related_tests=related_tests,
         )
 
         async def _bus_progress(

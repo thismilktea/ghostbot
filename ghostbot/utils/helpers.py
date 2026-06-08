@@ -82,9 +82,11 @@ def current_time_str(timezone: str | None = None) -> str:
 
 _UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*]')
 _TOOL_RESULT_PREVIEW_CHARS = 1200
+_TOOL_RESULT_MEDIUM_PREVIEW_CHARS = 600
 _TOOL_RESULTS_DIR = ".ghostbot/tool-results"
 _TOOL_RESULT_RETENTION_SECS = 7 * 24 * 60 * 60
 _TOOL_RESULT_MAX_BUCKETS = 32
+_TOOL_RESULT_MEDIUM_THRESHOLD = 8_000
 
 def safe_filename(name: str) -> str:
     """Replace unsafe path characters with underscores."""
@@ -199,8 +201,67 @@ def maybe_persist_tool_result(
     max_chars: int,
 ) -> Any:
     """Persist oversized tool output and replace it with a stable reference string."""
+    outcome = classify_and_persist_tool_result(
+        workspace=workspace,
+        session_key=session_key,
+        tool_call_id=tool_call_id,
+        content=content,
+        max_chars=max_chars,
+    )
+    return outcome.display_content
+
+
+class ToolResultOutcome:
+    __slots__ = ("display_content", "original_chars", "tier", "persisted_path", "preview_chars", "strategy")
+
+    def __init__(
+        self,
+        display_content: Any,
+        original_chars: int,
+        tier: str,
+        persisted_path: str | None = None,
+        preview_chars: int = 0,
+        strategy: str = "inline",
+    ):
+        self.display_content = display_content
+        self.original_chars = original_chars
+        self.tier = tier
+        self.persisted_path = persisted_path
+        self.preview_chars = preview_chars
+        self.strategy = strategy
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "original_chars": self.original_chars,
+            "tier": self.tier,
+            "persisted_path": self.persisted_path,
+            "preview_chars": self.preview_chars,
+            "strategy": self.strategy,
+        }
+
+
+def classify_and_persist_tool_result(
+    workspace: Path | None,
+    session_key: str | None,
+    tool_call_id: str,
+    content: Any,
+    *,
+    max_chars: int,
+    medium_threshold: int | None = None,
+) -> ToolResultOutcome:
+    """Classify tool output into small/medium/large and persist if needed.
+
+    - small: content <= max_chars — kept inline as-is.
+    - medium: max_chars < content <= large_threshold — persisted, inline summary with preview.
+    - large: content > large_threshold — persisted, inline reference only (tiny preview).
+    """
+    if medium_threshold is None:
+        medium_threshold = _TOOL_RESULT_MEDIUM_THRESHOLD
+    large_threshold = max(max_chars * 4, medium_threshold * 4)
+
     if workspace is None or max_chars <= 0:
-        return content
+        text_len = len(content) if isinstance(content, str) else 0
+        return ToolResultOutcome(content, text_len, "small")
 
     text_payload: str | None = None
     suffix = "txt"
@@ -209,14 +270,18 @@ def maybe_persist_tool_result(
     elif isinstance(content, list):
         text_payload = stringify_text_blocks(content)
         if text_payload is None:
-            return content
+            return ToolResultOutcome(content, 0, "small")
         suffix = "json"
     else:
-        return content
+        return ToolResultOutcome(content, 0, "small")
 
-    if len(text_payload) <= max_chars:
-        return content
+    original_chars = len(text_payload)
 
+    # --- small: fits inline ---
+    if original_chars <= max_chars:
+        return ToolResultOutcome(content, original_chars, "small", strategy="inline")
+
+    # --- persist the full payload ---
     root = ensure_dir(workspace / _TOOL_RESULTS_DIR)
     bucket = ensure_dir(root / safe_filename(session_key or "default"))
     try:
@@ -230,13 +295,27 @@ def maybe_persist_tool_result(
         else:
             _write_text_atomic(path, text_payload)
 
-    preview = text_payload[:_TOOL_RESULT_PREVIEW_CHARS]
-    return _render_tool_result_reference(
+    # --- large: reference only with tiny preview ---
+    if original_chars > large_threshold:
+        tiny_preview = text_payload[:200]
+        display = (
+            f"[tool output persisted — large]\n"
+            f"Full output saved to: {path}\n"
+            f"Original size: {original_chars} chars\n"
+            f"Preview (first 200 chars):\n{tiny_preview}\n...\n"
+            f"(Use read_file or ReadPage to access the full output.)"
+        )
+        return ToolResultOutcome(display, original_chars, "large", str(path), 200, "reference_only")
+
+    # --- medium: structured summary with preview ---
+    preview = text_payload[:_TOOL_RESULT_MEDIUM_PREVIEW_CHARS]
+    display = _render_tool_result_reference(
         path,
-        original_size=len(text_payload),
+        original_size=original_chars,
         preview=preview,
-        truncated_preview=len(text_payload) > _TOOL_RESULT_PREVIEW_CHARS,
+        truncated_preview=original_chars > _TOOL_RESULT_MEDIUM_PREVIEW_CHARS,
     )
+    return ToolResultOutcome(display, original_chars, "medium", str(path), len(preview), "summary_with_preview")
 
 
 def split_message(content: str, max_len: int = 2000) -> list[str]:
@@ -411,6 +490,7 @@ def build_status_content(
     last_action: str | None = None,
     active_project: str | None = None,
     active_project_path: str | None = None,
+    context_snapshot: Any | None = None,
 ) -> str:
     """Build a human-readable runtime status snapshot.
 
@@ -418,6 +498,8 @@ def build_status_content(
         search_usage_text: Optional pre-formatted web search usage string
                            (produced by SearchUsageInfo.format()). When provided
                            it is appended as an extra section.
+        context_snapshot: Optional ContextBuildSnapshot from the last build_messages call.
+                          When provided, a context bucket dashboard is appended.
     """
     uptime_s = int(time.time() - start_time)
     uptime = (
@@ -463,7 +545,47 @@ def build_status_content(
         lines.append(f"\ud83d\udcdd Last action: {last_action}")
     if search_usage_text:
         lines.append(search_usage_text)
+    if context_snapshot is not None:
+        lines.append(_format_context_dashboard(context_snapshot))
     return "\n".join(lines)
+
+
+def _format_context_dashboard(snapshot: Any) -> str:
+    """Format a ContextBuildSnapshot into a human-readable dashboard section."""
+    buckets = getattr(snapshot, "buckets", None)
+    events = getattr(snapshot, "events", None)
+    if not buckets:
+        return ""
+    total = sum(b.final_chars for b in buckets)
+    section_lines = [
+        "",
+        "\u2500" * 36,
+        "\ud83e\udde9 Context Buckets:",
+    ]
+    for b in buckets:
+        pct = int((b.final_chars / total) * 100) if total > 0 else 0
+        strategy_tag = f" [{b.strategy}]" if b.strategy not in ("none", "full") else ""
+        dropped_tag = f" (-{b.dropped_chars}c)" if b.dropped_chars > 0 else ""
+        section_lines.append(
+            f"  {b.name}: {_fmt_chars(b.final_chars)}/{_fmt_chars(b.budget_chars)} ({pct}%){strategy_tag}{dropped_tag}"
+        )
+    section_lines.append(f"  Total: {_fmt_chars(total)}")
+    if events:
+        recent = events[-5:]
+        section_lines.append("")
+        section_lines.append("\ud83d\udcdc Recent compression:")
+        for ev in recent:
+            note = f" \u2014 {ev.note}" if getattr(ev, "note", None) else ""
+            section_lines.append(
+                f"  [{ev.bucket}] {ev.strategy}: kept {_fmt_chars(ev.kept_chars)}, dropped {_fmt_chars(ev.dropped_chars)}{note}"
+            )
+    return "\n".join(section_lines)
+
+
+def _fmt_chars(n: int) -> str:
+    if n >= 10_000:
+        return f"{n / 1000:.1f}k"
+    return f"{n}c"
 
 
 

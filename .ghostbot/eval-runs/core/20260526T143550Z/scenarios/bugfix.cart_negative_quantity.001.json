@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "run_id": "20260526T143550Z",
+  "scenario_id": "bugfix.cart_negative_quantity.001",
+  "category": "bugfix",
+  "fixture": "shop_project",
+  "model": "gpt-5.4 (0.1.5)",
+  "status": "fail",
+  "timing": {
+    "started_at": "2026-05-26T14:36:58.525269Z",
+    "ended_at": "2026-05-26T14:37:52.292953Z",
+    "latency_ms": 53767
+  },
+  "agent": {
+    "stop_reason": "completed",
+    "iterations": 6,
+    "had_injections": false,
+    "pending_approval": null,
+    "final_content": "Tool approval required.\n\nTool: exec\nReason: Shell command requires an approved executable plan\n\nReply `approve` to run it or `deny` to skip it.",
+    "error": null
+  },
+  "usage": {
+    "prompt_tokens": 39724,
+    "completion_tokens": 678,
+    "total_tokens": 40402,
+    "cache_read_input_tokens": 16384,
+    "cached_tokens": 16384
+  },
+  "tools": {
+    "tools_used": [
+      "edit_file",
+      "exec",
+      "glob",
+      "grep",
+      "list_dir",
+      "read_file"
+    ],
+    "tool_call_count": 10,
+    "redundant_tool_call_count": 1,
+    "failed_tool_call_count": 0,
+    "redundant_calls": [
+      "read_file:{\"limit\": 400, \"offset\": 1, \"pages\": \"1-20\", \"path\": \"shop/cart.py\"}"
+    ]
+  },
+  "files": {
+    "changed_files": [
+      "shop/cart.py"
+    ],
+    "added_files": [],
+    "deleted_files": [],
+    "scope_violations": []
+  },
+  "checks": [
+    {
+      "name": "pytest-cart",
+      "command": "'C:\\Users\\45825\\Desktop\\ghostbot\\.venv\\Scripts\\python.exe' -m pytest tests/test_cart.py",
+      "cwd": ".",
+      "exit_code": 1,
+      "passed": false,
+      "stdout": "",
+      "stderr": "�ļ�����Ŀ¼��������﷨����ȷ��\r\n"
+    }
+  ],
+  "metrics": {
+    "requirement_hit_rate": 0.25,
+    "self_correction_rate": 0.0,
+    "recovery_cost": 0,
+    "check_pass_rate": 0.0
+  },
+  "deterministic": {
+    "passed": false,
+    "failures": [
+      "Check failed: pytest-cart"
+    ]
+  },
+  "judge": {
+    "score": 0.11,
+    "passed": false,
+    "verdict": "fail",
+    "reasoning": "The run did not satisfy the scenario requirements. Although the changed file matches the requested target (`shop/cart.py`), the required validation step `pytest tests/test_cart.py` was not successfully completed. The provided check result shows `pytest-cart: fail (exit=1)`, and deterministic failures are non-empty (`Check failed: pytest-cart`), which is a hard failure and prevents a passing verdict. Additionally, the agent's final response only requested tool approval instead of delivering a completed fix with successful test verification."
+  },
+  "trace_file": "C:\\Users\\45825\\Desktop\\ghostbot\\.ghostbot\\eval-runs\\core\\20260526T143550Z\\scenarios\\bugfix.cart_negative_quantity.001.trace.json"
+}

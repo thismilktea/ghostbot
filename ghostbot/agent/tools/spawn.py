@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     tool_parameters_schema(
         task=StringSchema("The task for the subagent to complete"),
         label=StringSchema("Optional short label for the task (for display)"),
+        model=StringSchema("Optional model tier: 'fast' for cheap/quick tasks, 'strong' for complex reasoning, or a literal model name. Defaults to the parent model."),
         required=["task"],
     )
 )
@@ -41,11 +42,12 @@ class SpawnTool(Tool):
             "Spawn a subagent to handle a task in the background. "
             "Use this for complex or time-consuming tasks that can run independently. "
             "The subagent will complete the task and report back when done. "
+            "Use model='fast' for simple lookups, model='strong' for deep reasoning. "
             "For deliverables or existing projects, inspect the workspace first "
             "and use a dedicated subdirectory when helpful."
         )
 
-    async def execute(self, task: str, label: str | None = None, **kwargs: Any) -> str:
+    async def execute(self, task: str, label: str | None = None, model: str | None = None, **kwargs: Any) -> str:
         """Spawn a subagent to execute the given task."""
         return await self._manager.spawn(
             task=task,
@@ -53,4 +55,5 @@ class SpawnTool(Tool):
             origin_channel=self._origin_channel,
             origin_chat_id=self._origin_chat_id,
             project_key=self._project_key,
+            model=model,
         )

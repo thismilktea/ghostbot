@@ -3,8 +3,9 @@ import logging
 import re
 import threading
 import json
+from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 # 🚀 引入 tree-sitter 核心引擎
 try:
@@ -68,6 +69,7 @@ class ProjectAnalyzer:
         safe_name = re.sub(r'[^a-zA-Z0-9_\-]', '_', workspace.name)
         self.output_md = self.projects_dir / f"{safe_name}.md"
         self.cache_file = self.projects_dir / f"{safe_name}_cache.json"
+        self.graph_file = self.projects_dir / f"{safe_name}_graph.json"
 
         self.excluded = {'.git', '.idea', '.vscode', 'target', 'node_modules', 'venv', 'dist', 'build', '__pycache__'}
         if ignore_dirs:
@@ -89,6 +91,282 @@ class ProjectAnalyzer:
     def _save_cache(self):
         with self._lock:
             self.cache_file.write_text(json.dumps(self.symbol_cache, ensure_ascii=False), encoding="utf-8")
+
+    @staticmethod
+    def _symbol_kind(definition: str) -> str:
+        return "class" if definition.startswith("C:") else "method"
+
+    def build_graph_artifact(self) -> dict[str, Any]:
+        global_defs = self._build_global_defs()
+        symbols: list[dict[str, Any]] = []
+        file_symbols: dict[str, list[str]] = {}
+        references: list[dict[str, str]] = []
+        file_edges_map: dict[tuple[str, str], set[str]] = defaultdict(set)
+
+        for file_path, data in sorted(self.symbol_cache.items()):
+            definitions = data.get("defs", [])
+            refs = data.get("refs", [])
+            symbol_ids: list[str] = []
+            for definition in definitions:
+                raw_name = definition[2:]
+                symbol_id = f"{file_path}::{raw_name}"
+                symbol_ids.append(symbol_id)
+                symbols.append({
+                    "symbol_id": symbol_id,
+                    "name": raw_name,
+                    "kind": self._symbol_kind(definition),
+                    "file_path": file_path,
+                    "language": Path(file_path).suffix.lstrip("."),
+                })
+
+            file_symbols[file_path] = symbol_ids
+            for ref in refs:
+                target_file = global_defs.get(ref)
+                if not target_file:
+                    continue
+                target_symbol_id = f"{target_file}::{ref}"
+                references.append({
+                    "source_file": file_path,
+                    "target_file": target_file,
+                    "target_symbol": target_symbol_id,
+                    "ref_name": ref,
+                    "ref_kind": "call_or_import",
+                })
+                if target_file != file_path:
+                    file_edges_map[(file_path, target_file)].add("ref")
+
+        file_edges = [
+            {"source": source, "target": target, "edge_kinds": sorted(kinds)}
+            for (source, target), kinds in sorted(file_edges_map.items())
+        ]
+        return {
+            "project_name": self.workspace.name,
+            "project_path": str(self.workspace.resolve()),
+            "generated_at": time.time(),
+            "symbols": symbols,
+            "file_symbols": file_symbols,
+            "references": references,
+            "file_edges": file_edges,
+        }
+
+    def _save_graph_artifact(self, artifact: dict[str, Any]) -> None:
+        with self._lock:
+            self.graph_file.write_text(json.dumps(artifact, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def load_graph_artifact(self) -> dict[str, Any]:
+        if not self.graph_file.exists():
+            return self.build_graph_artifact()
+        try:
+            return json.loads(self.graph_file.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning(f"加载图谱失败: {e}")
+            return self.build_graph_artifact()
+
+    def find_symbol(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        artifact = self.load_graph_artifact()
+        normalized = query.strip().casefold()
+        if not normalized:
+            return []
+        matches = [
+            symbol for symbol in artifact.get("symbols", [])
+            if normalized in str(symbol.get("name", "")).casefold()
+        ]
+        matches.sort(key=lambda symbol: (symbol.get("name") != query, symbol.get("file_path", "")))
+        return matches[:limit]
+
+    def _resolve_symbol_matches(self, query: str, limit: int = 20) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        artifact = self.load_graph_artifact()
+        matches = self.find_symbol(query, limit=limit)
+        normalized = query.strip().casefold()
+        exact_matches = [
+            item for item in matches
+            if str(item.get("name") or "").casefold() == normalized
+        ]
+        return artifact, (exact_matches or matches)
+
+    def find_callers(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        artifact, matches = self._resolve_symbol_matches(query)
+        if not matches:
+            return []
+        target_ids = {str(item.get("symbol_id") or "") for item in matches}
+        target_names = {str(item.get("name") or "") for item in matches}
+        callers: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for reference in artifact.get("references", []):
+            target_symbol = str(reference.get("target_symbol") or "")
+            ref_name = str(reference.get("ref_name") or "")
+            if target_symbol not in target_ids and ref_name not in target_names:
+                continue
+            source_file = str(reference.get("source_file") or "")
+            key = (source_file, target_symbol, ref_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            callers.append({
+                "source_file": source_file,
+                "target_symbol": target_symbol,
+                "ref_name": ref_name,
+                "target_file": str(reference.get("target_file") or ""),
+            })
+        callers.sort(key=lambda item: (item.get("source_file", ""), item.get("ref_name", "")))
+        return callers[:limit]
+
+    def find_callees(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        artifact, matches = self._resolve_symbol_matches(query)
+        if not matches:
+            return []
+        source_files = {str(item.get("file_path") or "") for item in matches}
+        callees: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for reference in artifact.get("references", []):
+            source_file = str(reference.get("source_file") or "")
+            if source_file not in source_files:
+                continue
+            target_symbol = str(reference.get("target_symbol") or "")
+            ref_name = str(reference.get("ref_name") or "")
+            key = (source_file, target_symbol, ref_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            callees.append({
+                "source_file": source_file,
+                "target_symbol": target_symbol,
+                "ref_name": ref_name,
+                "target_file": str(reference.get("target_file") or ""),
+            })
+        callees.sort(key=lambda item: (item.get("target_file", ""), item.get("ref_name", "")))
+        return callees[:limit]
+
+    def find_related_files(self, path_or_symbol: str, limit: int = 10) -> list[dict[str, Any]]:
+        artifact = self.load_graph_artifact()
+        query = self._normalize_path_key(path_or_symbol)
+        score_map: dict[str, float] = defaultdict(float)
+        reasons: dict[str, list[str]] = defaultdict(list)
+
+        symbol_matches = self.find_symbol(path_or_symbol, limit=20)
+        symbol_files = {match["file_path"] for match in symbol_matches}
+        anchor_files = {query, *symbol_files}
+
+        for edge in artifact.get("file_edges", []):
+            source = edge.get("source", "")
+            target = edge.get("target", "")
+            if source in anchor_files and target not in anchor_files:
+                score_map[target] += 2.0
+                reasons[target].append(f"referenced by {source}")
+            if target in anchor_files and source not in anchor_files:
+                score_map[source] += 1.0
+                reasons[source].append(f"references {target}")
+
+        for matched_file in symbol_files:
+            if matched_file != query:
+                score_map[matched_file] += 3.0
+                reasons[matched_file].append("defines matching symbol")
+
+        ranked = sorted(score_map.items(), key=lambda item: (-item[1], item[0]))[:limit]
+        return [
+            {"file_path": file_path, "score": score, "reasons": reasons[file_path]}
+            for file_path, score in ranked
+        ]
+
+    def find_impacted_files(self, path_or_symbol: str, limit: int = 10) -> list[dict[str, Any]]:
+        artifact = self.load_graph_artifact()
+        query = self._normalize_path_key(path_or_symbol)
+        symbol_matches = self.find_symbol(path_or_symbol, limit=20)
+        symbol_files = {match["file_path"] for match in symbol_matches}
+        anchor_files = {item for item in {query, *symbol_files} if item}
+        if not anchor_files:
+            return []
+
+        score_map: dict[str, float] = defaultdict(float)
+        reasons: dict[str, list[str]] = defaultdict(list)
+
+        for edge in artifact.get("file_edges", []):
+            source = str(edge.get("source") or "")
+            target = str(edge.get("target") or "")
+            if not source or not target:
+                continue
+            if source in anchor_files and target not in anchor_files:
+                score_map[target] += 4.0
+                reasons[target].append(f"outbound dependency from {source}")
+            if target in anchor_files and source not in anchor_files:
+                score_map[source] += 2.5
+                reasons[source].append(f"depends on {target}")
+
+        for reference in artifact.get("references", []):
+            source_file = str(reference.get("source_file") or "")
+            target_file = str(reference.get("target_file") or "")
+            ref_name = str(reference.get("ref_name") or "")
+            if target_file in anchor_files and source_file not in anchor_files:
+                score_map[source_file] += 3.0
+                reasons[source_file].append(f"calls {ref_name} in {target_file}")
+            if source_file in anchor_files and target_file not in anchor_files:
+                score_map[target_file] += 1.5
+                reasons[target_file].append(f"called from {source_file} via {ref_name}")
+
+        ranked = sorted(score_map.items(), key=lambda item: (-item[1], item[0]))[:limit]
+        return [
+            {"file_path": file_path, "score": score, "reasons": list(dict.fromkeys(reasons[file_path]))}
+            for file_path, score in ranked
+        ]
+
+    def find_related_tests(
+        self,
+        path_or_symbol: str,
+        *,
+        limit: int = 10,
+        impacted_limit: int = 6,
+    ) -> list[dict[str, Any]]:
+        query = self._normalize_path_key(path_or_symbol)
+        impacted = self.find_impacted_files(path_or_symbol, limit=impacted_limit)
+        source_paths = [query, *(str(item.get("file_path") or "").strip() for item in impacted)]
+        normalized_sources = {
+            self._normalize_path_key(path)
+            for path in source_paths
+            if self._normalize_path_key(path)
+        }
+        if not normalized_sources:
+            return []
+
+        candidates: list[dict[str, Any]] = []
+        for file_path in self.symbol_cache.keys():
+            normalized = self._normalize_path_key(str(file_path))
+            if not normalized:
+                continue
+            lower = normalized.casefold()
+            if "test" not in lower:
+                continue
+
+            score = 0.0
+            reasons: list[str] = []
+            stem = Path(normalized).stem.casefold()
+            for source in normalized_sources:
+                source_name = Path(source).stem.casefold()
+                if source_name and (source_name in stem or stem in source_name):
+                    score += 4.0
+                    reasons.append(f"name matches {source}")
+
+            for item in self.find_related_files(normalized, limit=8):
+                related_path = self._normalize_path_key(str(item.get("file_path") or "").strip())
+                if related_path not in normalized_sources:
+                    continue
+                item_score = float(item.get("score") or 0.0)
+                score += max(1.0, item_score)
+                reasons.extend(
+                    f"graph-linked to {related_path}: {str(reason).strip()}"
+                    for reason in item.get("reasons", [])
+                    if str(reason).strip()
+                )
+
+            if score <= 0 or not reasons:
+                continue
+            candidates.append({
+                "file_path": normalized,
+                "score": score,
+                "reasons": list(dict.fromkeys(reasons)),
+            })
+
+        candidates.sort(key=lambda item: (-float(item.get("score") or 0.0), str(item.get("file_path") or "")))
+        return candidates[:limit]
 
     def _extract_symbols_ts(self, content: str, lang_id: str) -> Dict[str, List[str]]:
         """使用 Tree-sitter 提取定义和引用"""
@@ -137,7 +415,10 @@ class ProjectAnalyzer:
             if m not in {'if', 'while', 'for', 'switch', 'main'}:
                 defs.append(f"M:{m}")
 
-        calls = re.findall(r'([a-zA-Z_][a-zA-Z0-9_]*)\s*\(', content)
+        calls = re.findall(
+            r'(?<!def\s)(?<!class\s)(?<!interface\s)(?<!enum\s)(?<!func\s)(?<!void\s)(?<!public\s)(?<!private\s)([a-zA-Z_][a-zA-Z0-9_]*)\s*\(',
+            content,
+        )
         refs.extend(calls)
 
         return {
@@ -316,13 +597,16 @@ class ProjectAnalyzer:
                 self._save_cache()
 
             repo_map_text = self.get_repo_map()
+            graph_artifact = self.build_graph_artifact()
             header = (
                 f"# 🏗️ Project Topology: {self.workspace.name}\n"
                 f"> Project Path: {self.workspace.resolve()}\n"
                 f"> Mode: Aider-style Repo Map\n"
-                f"> Last Sync: {time.ctime()}\n\n"
+                f"> Last Sync: {time.ctime()}\n"
+                f"> Graph Artifact: {self.graph_file.name}\n\n"
             )
             self.output_md.write_text(header + "```text\n" + repo_map_text + "\n```", encoding="utf-8")
+            self._save_graph_artifact(graph_artifact)
 
             logger.info(f"✅ 图谱已更新: {self.output_md.name}")
         except Exception as e:
@@ -346,10 +630,10 @@ class ProjectAnalyzer:
 
 
 def sync_project_structure(target_workspace: Path, memory_dir: Path, max_depth: int = 4, force: bool = False,
-                           ignore_dirs: set = None) -> Tuple[bool, Path]:
+                           ignore_dirs: set = None) -> Tuple[bool, Path, Path]:
     analyzer = ProjectAnalyzer(target_workspace, memory_dir, ignore_dirs=ignore_dirs)
     if force:
         analyzer._safe_perform_scan(max_depth)
     else:
         analyzer.async_sync(max_depth, force)
-    return True, analyzer.output_md
+    return True, analyzer.output_md, analyzer.graph_file

@@ -1,0 +1,12 @@
+{
+  "key": "eval_plan.empty.001",
+  "name": "eval_plan.empty.001",
+  "path": null,
+  "created_at": "2026-05-25T23:15:43.773278",
+  "updated_at": "2026-05-25T23:15:46.330595",
+  "metadata": {
+    "active_project": "eval_plan.empty.001"
+  },
+  "last_consolidated": 0,
+  "active_files": {}
+}

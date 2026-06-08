@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "run_id": "20260525T150550Z",
+  "scenario_id": "bugfix.cart_negative_quantity.001",
+  "category": "bugfix",
+  "fixture": "shop_project",
+  "model": "gpt-5.4 (0.1.5)",
+  "status": "fail",
+  "timing": {
+    "started_at": "2026-05-25T15:05:51.160768Z",
+    "ended_at": "2026-05-25T15:05:52.515797Z",
+    "latency_ms": 1354
+  },
+  "agent": {
+    "stop_reason": "completed",
+    "iterations": 1,
+    "had_injections": false,
+    "pending_approval": null,
+    "final_content": "Error: {'error': {'code': '', 'message': '无权访问 A-特价gpt-plus速刷 分组 (request id: 202605251505555559241688268d9d6YplKA0o9)', 'type': 'new_api_error'}}",
+    "error": null
+  },
+  "usage": {},
+  "tools": {
+    "tools_used": [],
+    "tool_call_count": 0,
+    "redundant_tool_call_count": 0,
+    "failed_tool_call_count": 0,
+    "redundant_calls": []
+  },
+  "files": {
+    "changed_files": [],
+    "added_files": [],
+    "deleted_files": [],
+    "scope_violations": []
+  },
+  "checks": [
+    {
+      "name": "pytest-cart",
+      "command": "'C:\\Users\\45825\\Desktop\\ghostbot\\.venv\\Scripts\\python.exe' -m pytest tests/test_cart.py",
+      "cwd": ".",
+      "exit_code": 1,
+      "passed": false,
+      "stdout": "",
+      "stderr": "�ļ�����Ŀ¼��������﷨����ȷ��\r\n"
+    }
+  ],
+  "metrics": {
+    "requirement_hit_rate": 0.0,
+    "self_correction_rate": 0.0,
+    "recovery_cost": 0,
+    "check_pass_rate": 0.0
+  },
+  "deterministic": {
+    "passed": false,
+    "failures": [
+      "Missing required changed file: shop/cart.py",
+      "Check failed: pytest-cart"
+    ]
+  },
+  "judge": {
+    "score": 0.0,
+    "passed": false,
+    "verdict": "judge_error",
+    "reasoning": "Judge returned no tool call."
+  },
+  "trace_file": "C:\\Users\\45825\\Desktop\\ghostbot\\.ghostbot\\eval-runs\\core\\20260525T150550Z\\scenarios\\bugfix.cart_negative_quantity.001.trace.json"
+}

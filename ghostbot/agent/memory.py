@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import weakref
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -29,6 +30,16 @@ STOP_WORDS = {
     "请", "帮", "一下", "怎么", "什么", "为什么",
     "def", "class", "import", "return", "if", "else" # 高频但无检索区分度的代码词
 }
+
+
+@dataclass(slots=True)
+class MemoryRecord:
+    cursor: str
+    summary: str
+    content: str
+    scope: str = "global"
+    record_type: str = "episode"
+
 
 import sqlite3
 import re
@@ -254,14 +265,50 @@ class HybridSearchEngine:
 
         print(f"\n🔍 [主动搜索] 触发内部 FTS5 检索: '{query}'")
 
-        # 1. 直接复用新写好的底层方法
         raw_scores = self.get_raw_scores(query, top_k=top_k * 2)
-
-        # 2. 主动搜索工具默认给定 "low" 的时序意图（0.05 的衰减）
         decayed_results = self.fetch_and_decay(raw_scores, temporal_intent="low", current_cursor=current_cursor)
-
-        # 3. 截断并转为兼容的元组格式返回
         return [(item[1], item[2]) for item in decayed_results[:top_k]]
+
+    @staticmethod
+    def _infer_record_type(text: str) -> str:
+        lowered = text.casefold()
+        if any(token in lowered for token in ("must", "should", "不要", "必须", "约束", "constraint")):
+            return "instruction"
+        if any(token in lowered for token in ("prefer", "偏好", "喜欢", "习惯")):
+            return "preference"
+        if any(token in lowered for token in ("decision", "决定", "结论", "agreed")):
+            return "decision"
+        if any(token in lowered for token in ("project", "仓库", "模块", "评测", "release")):
+            return "project_fact"
+        return "episode"
+
+    @staticmethod
+    def _infer_scope(text: str) -> str:
+        lowered = text.casefold()
+        if any(token in lowered for token in ("branch", "分支", "pr", "pull request")):
+            return "branch"
+        if any(token in lowered for token in ("project", "仓库", "repo", "模块")):
+            return "project"
+        if any(token in lowered for token in ("task", "下一步", "todo", "checklist")):
+            return "task-cluster"
+        return "global"
+
+    @staticmethod
+    def _summarize_record(text: str, max_chars: int = 180) -> str:
+        first_nonempty = next((line.strip("-*• \t") for line in text.splitlines() if line.strip()), "")
+        return first_nonempty[:max_chars] if first_nonempty else text[:max_chars]
+
+    def search_records(self, query: str, top_k: int = 5, current_cursor: int = 0) -> list[MemoryRecord]:
+        return [
+            MemoryRecord(
+                cursor=cursor,
+                summary=self._summarize_record(text),
+                content=text,
+                scope=self._infer_scope(text),
+                record_type=self._infer_record_type(text),
+            )
+            for cursor, text in self.search(query, top_k=top_k, current_cursor=current_cursor)
+        ]
 
 # ---------------------------------------------------------------------------
 # MemoryStore — pure file I/O layer

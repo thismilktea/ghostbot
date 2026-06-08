@@ -1,0 +1,12 @@
+{
+  "key": "eval_bugfix.cart_negative_quantity.001",
+  "name": "eval_bugfix.cart_negative_quantity.001",
+  "path": null,
+  "created_at": "2026-05-25T23:31:56.606450",
+  "updated_at": "2026-05-25T23:33:08.361667",
+  "metadata": {
+    "active_project": "eval_bugfix.cart_negative_quantity.001"
+  },
+  "last_consolidated": 0,
+  "active_files": {}
+}

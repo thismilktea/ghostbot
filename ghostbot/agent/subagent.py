@@ -47,6 +47,8 @@ class SubagentManager:
         bus: MessageBus,
         max_tool_result_chars: int,
         model: str | None = None,
+        fast_model: str | None = None,
+        strong_model: str | None = None,
         web_config: "WebToolsConfig | None" = None,
         exec_config: "ExecToolConfig | None" = None,
         restrict_to_workspace: bool = False,
@@ -58,6 +60,8 @@ class SubagentManager:
         self.workspace = workspace
         self.bus = bus
         self.model = model or provider.get_default_model()
+        self.fast_model = fast_model or self.model
+        self.strong_model = strong_model or self.model
         self.web_config = web_config or WebToolsConfig()
         self.max_tool_result_chars = max_tool_result_chars
         self.exec_config = exec_config or ExecToolConfig()
@@ -67,6 +71,19 @@ class SubagentManager:
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._project_tasks: dict[str, set[str]] = {}
 
+    def resolve_model(self, model: str | None = None) -> str:
+        """Resolve a model spec to a concrete model string.
+
+        Accepts: None (default model), "fast", "strong", or a literal model name.
+        """
+        if model is None:
+            return self.model
+        if model == "fast":
+            return self.fast_model
+        if model == "strong":
+            return self.strong_model
+        return model
+
     async def spawn(
         self,
         task: str,
@@ -74,14 +91,16 @@ class SubagentManager:
         origin_channel: str = "cli",
         origin_chat_id: str = "direct",
         project_key: str | None = None,
+        model: str | None = None,
     ) -> str:
         """Spawn a subagent to execute a task in the background."""
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         origin = {"channel": origin_channel, "chat_id": origin_chat_id}
+        resolved_model = self.resolve_model(model)
 
         bg_task = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin)
+            self._run_subagent(task_id, task, display_label, origin, resolved_model)
         )
         self._running_tasks[task_id] = bg_task
         if project_key:
@@ -105,9 +124,11 @@ class SubagentManager:
         task: str,
         label: str,
         origin: dict[str, str],
+        model: str | None = None,
     ) -> None:
         """Execute the subagent task and announce the result."""
-        logger.info("Subagent [{}] starting task: {}", task_id, label)
+        resolved_model = model or self.model
+        logger.info("Subagent [{}] starting task: {} (model: {})", task_id, label, resolved_model)
 
         try:
             tools = ToolRegistry()
@@ -126,7 +147,7 @@ class SubagentManager:
             result = await self.runner.run(AgentRunSpec(
                 initial_messages=messages,
                 tools=tools,
-                model=self.model,
+                model=resolved_model,
                 max_iterations=15,
                 max_tool_result_chars=self.max_tool_result_chars,
                 hook=_SubagentHook(task_id),

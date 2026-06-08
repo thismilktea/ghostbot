@@ -58,7 +58,7 @@ async def cmd_scan(ctx: CommandContext) -> OutboundMessage:
 
     ignore_dirs = {".venv", "venv", "env", "sessions", ".git", ".pytest_cache", "__pycache__", "node_modules"}
 
-    is_success, saved_file = sync_project_structure(
+    is_success, saved_file, graph_file = sync_project_structure(
         target_path,
         memory_dir,
         force=True,
@@ -71,12 +71,13 @@ async def cmd_scan(ctx: CommandContext) -> OutboundMessage:
         project = ctx.loop.projects.get_or_create(project_name, path=project_path, name=project_name)
         project.metadata["active_project"] = project_name
         project.metadata["active_project_path"] = project_path
+        project.metadata["active_project_graph"] = str(graph_file)
         ctx.loop.projects.save(project)
         ctx.loop.projects.set_active_for_origin(ctx.loop._origin_key(ctx.msg), project.key)
 
         return OutboundMessage(
             channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
-            content=f"✅ 扫描完成并已切换至项目: `{project_name}`\n路径: `{project_path}`",
+            content=f"✅ 扫描完成并已切换至项目: `{project_name}`\n路径: `{project_path}`\n图谱: `{graph_file.name}`",
             metadata=dict(ctx.msg.metadata or {})
         )
     else:
@@ -107,16 +108,21 @@ async def cmd_use(ctx: CommandContext) -> OutboundMessage:
         )
 
     project_path = _extract_project_path(project_file)
+    graph_file = project_file.with_name(f"{project_name}_graph.json")
     project = ctx.loop.projects.get_or_create(project_name, path=project_path, name=project_name)
     project.metadata["active_project"] = project_name
     if project_path:
         project.metadata["active_project_path"] = project_path
+    if graph_file.exists():
+        project.metadata["active_project_graph"] = str(graph_file)
     ctx.loop.projects.save(project)
     ctx.loop.projects.set_active_for_origin(ctx.loop._origin_key(ctx.msg), project.key)
     legacy = ctx.loop.sessions.get_or_create(ctx.loop._origin_key(ctx.msg))
     legacy.metadata["active_project"] = project_name
     if project_path:
         legacy.metadata["active_project_path"] = project_path
+    if graph_file.exists():
+        legacy.metadata["active_project_graph"] = str(graph_file)
     ctx.loop.sessions.save(legacy)
 
     path_note = f" 路径: `{project_path}`" if project_path else ""
@@ -190,6 +196,7 @@ async def cmd_status(ctx: CommandContext) -> OutboundMessage:
     except Exception:
         pass  # Never let usage fetch break /status
     metadata = session.metadata or {}
+    context_snapshot = getattr(loop.context, "_last_snapshot", None)
     return OutboundMessage(
         channel=ctx.msg.channel,
         chat_id=ctx.msg.chat_id,
@@ -208,6 +215,7 @@ async def cmd_status(ctx: CommandContext) -> OutboundMessage:
             last_action=metadata.get("last_action"),
             active_project=metadata.get("active_project"),
             active_project_path=metadata.get("active_project_path"),
+            context_snapshot=context_snapshot,
         ),
         metadata={**dict(ctx.msg.metadata or {}), "render_as": "text"},
     )

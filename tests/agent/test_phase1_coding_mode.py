@@ -790,6 +790,7 @@ async def test_pending_approval_approve_executes_saved_tool_once_and_resumes(tmp
     assert tool_messages[0]["name"] == "exec"
     assert tool_messages[0]["content"] == "ran"
 
+def test_default_allowed_tool_names_include_graph_queries(tmp_path):
     loop = AgentLoop(
         bus=MessageBus(),
         provider=_LoopProvider(),
@@ -798,5 +799,15 @@ async def test_pending_approval_approve_executes_saved_tool_once_and_resumes(tmp
     )
 
     assert loop.restrict_to_workspace is True
-    assert loop._allowed_tool_names() == {"read_file", "list_dir", "glob", "grep"}
+    assert loop._allowed_tool_names() == {
+        "read_file",
+        "list_dir",
+        "glob",
+        "grep",
+        "find_symbol",
+        "find_callers",
+        "find_callees",
+        "find_related_files",
+        "find_impacted_files",
+    }
     assert loop._blocked_tool_prefixes() == ("mcp_",)

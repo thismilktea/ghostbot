@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "run_id": "20260525T153155Z",
+  "suite_name": "ghostbot-eval-core",
+  "generated_at": "2026-05-25T15:33:17.724303Z",
+  "results": [
+    {
+      "schema_version": 1,
+      "run_id": "20260525T153155Z",
+      "scenario_id": "bugfix.cart_negative_quantity.001",
+      "category": "bugfix",
+      "fixture": "shop_project",
+      "model": "gpt-5.4 (0.1.5)",
+      "status": "fail",
+      "timing": {
+        "started_at": "2026-05-25T15:31:56.605151Z",
+        "ended_at": "2026-05-25T15:33:08.365133Z",
+        "latency_ms": 71759
+      },
+      "agent": {
+        "stop_reason": "completed",
+        "iterations": 8,
+        "had_injections": false,
+        "pending_approval": null,
+        "final_content": "已修复并验证代码变更如下：\n\n1. 修复逻辑\n- 文件: `shop/cart.py`\n- 增加了对负数数量的校验：\n  - 当 `quantity < 0` 时抛出 `ValueError(\"quantity must be non-negative\")`\n\n2. 补充测试\n- 文件: `tests/test_cart.py`\n- 新增测试：\n  - `test_add_to_cart_rejects_negative_quantity`\n\n3. 验证结果\n我按要求运行了：\n- `pytest tests/test_cart.py` → 失败，原因是系统里没有 `pytest` 命令\n随后尝试：\n- `python -m pytest tests/test_cart.py` → 失败，原因是当前 Python 环境未安装 `pytest`\n\n报错关键信息：\n- `'pytest' 不是内部或外部命令`\n- `No module named pytest`\n\n如果你要我继续，我可以帮你安装 pytest 后再跑测试。",
+        "error": null
+      },
+      "usage": {
+        "prompt_tokens": 42487,
+        "completion_tokens": 1094,
+        "total_tokens": 43581,
+        "cache_read_input_tokens": 12800,
+        "cached_tokens": 12800
+      },
+      "tools": {
+        "tools_used": [
+          "edit_file",
+          "exec",
+          "glob",
+          "list_dir",
+          "read_file"
+        ],
+        "tool_call_count": 11,
+        "redundant_tool_call_count": 2,
+        "failed_tool_call_count": 0,
+        "redundant_calls": [
+          "read_file:{\"limit\": 400, \"offset\": 1, \"pages\": \"\", \"path\": \"shop/cart.py\"}",
+          "read_file:{\"limit\": 400, \"offset\": 1, \"pages\": \"\", \"path\": \"tests/test_cart.py\"}"
+        ]
+      },
+      "files": {
+        "changed_files": [
+          "shop/cart.py",
+          "tests/test_cart.py"
+        ],
+        "added_files": [],
+        "deleted_files": [],
+        "scope_violations": []
+      },
+      "checks": [
+        {
+          "name": "pytest-cart",
+          "command": "'C:\\Users\\45825\\Desktop\\ghostbot\\.venv\\Scripts\\python.exe' -m pytest tests/test_cart.py",
+          "cwd": ".",
+          "exit_code": 1,
+          "passed": false,
+          "stdout": "",
+          "stderr": "�ļ�����Ŀ¼��������﷨����ȷ��\r\n"
+        }
+      ],
+      "metrics": {
+        "requirement_hit_rate": 0.75,
+        "self_correction_rate": 0.0,
+        "recovery_cost": 0,
+        "check_pass_rate": 0.0
+      },
+      "deterministic": {
+        "passed": false,
+        "failures": [
+          "Check failed: pytest-cart"
+        ]
+      },
+      "judge": {
+        "score": 0.07,
+        "passed": false,
+        "verdict": "fail",
+        "reasoning": "The run does not satisfy the scenario requirements. A hard deterministic failure is present: `pytest-cart` failed, and per instruction deterministic failures cannot be ignored, so the verdict cannot be pass. The acceptance criteria explicitly required running `pytest tests/test_cart.py`, but the final response reports that `pytest` was unavailable and `python -m pytest` also failed because pytest was not installed, so validation was not completed successfully. Additionally, the acceptance criteria listed `modify file: shop/cart.py`, while the changed files include both `shop/cart.py` and `tests/test_cart.py`, which is a deviation from the stated file modification scope."
+      },
+      "trace_file": "C:\\Users\\45825\\Desktop\\ghostbot\\.ghostbot\\eval-runs\\core\\20260525T153155Z\\scenarios\\bugfix.cart_negative_quantity.001.trace.json"
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "passed": 0,
+    "failed": 1,
+    "errors": 0,
+    "pass_rate": 0.0,
+    "latency_p50_ms": 71759,
+    "latency_p90_ms": 71759,
+    "token_p50": 112762,
+    "token_p90": 112762,
+    "redundant_tool_rate_p50": 0.18181818181818182,
+    "tool_call_p50": 11,
+    "requirement_hit_rate_p50": 0.75,
+    "self_correction_rate_p50": 0.0,
+    "recovery_cost_p50": 0,
+    "check_pass_rate": 0.0
+  }
+}

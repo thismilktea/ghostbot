@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "name": "ghostbot-eval-smoke",
+  "description": "Minimal smoke suite for eval harness validation.",
+  "defaults": {
+    "max_iterations": 4,
+    "timeout_seconds": 900,
+    "temperature": 0.0,
+    "judge_models": [],
+    "disable_mcp": true
+  },
+  "fixtures": {
+    "empty": {
+      "type": "empty",
+      "source": null,
+      "reset": "fresh"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "plan.empty.001",
+      "category": "plan_only",
+      "fixture": "empty",
+      "mode": "plan_only",
+      "prompt": "请制定一个简短计划，不要修改任何文件，并在回复中包含计划。",
+      "turns": [],
+      "setup": {
+        "commands": [],
+        "files": [],
+        "memory_seed": []
+      },
+      "expected": {
+        "must_not_modify_files": true,
+        "allowed_changed_files": [],
+        "forbidden_changed_files": [],
+        "required_changed_files": [],
+        "required_phrases": [
+          "计划"
+        ],
+        "forbidden_phrases": [],
+        "acceptance_criteria": [],
+        "checks": [],
+        "max_tool_calls": null,
+        "max_changed_files": null
+      },
+      "judging": {
+        "rubric": null,
+        "min_score": null,
+        "pairwise_baseline": false,
+        "required_capabilities": []
+      },
+      "tags": []
+    }
+  ]
+}

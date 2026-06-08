@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "name": "ghostbot-eval-smoke",
+  "description": "Minimal smoke suite for eval harness validation.",
+  "defaults": {
+    "max_iterations": 4
+  },
+  "fixtures": {
+    "empty": {
+      "type": "empty",
+      "reset": "fresh"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "plan.empty.001",
+      "category": "plan_only",
+      "fixture": "empty",
+      "mode": "plan_only",
+      "prompt": "请制定一个简短计划，不要修改任何文件，并在回复中包含计划。",
+      "expected": {
+        "must_not_modify_files": true,
+        "required_phrases": ["计划"]
+      }
+    }
+  ]
+}

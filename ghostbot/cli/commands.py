@@ -55,8 +55,9 @@ class SafeFileHistory(FileHistory):
         safe = string.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
         super().store_string(safe)
 from ghostbot.cli.stream import StreamRenderer, ThinkingSpinner
-from ghostbot.config.paths import get_workspace_path, is_default_workspace
+from ghostbot.config.paths import get_workspace_path
 from ghostbot.config.schema import Config
+from ghostbot.runtime.bootstrap import build_agent_runtime, build_api_runtime
 from ghostbot.utils.helpers import sync_workspace_templates
 from ghostbot.utils.restart import (
     consume_restart_notice_from_env,
@@ -420,79 +421,14 @@ def _onboard_plugins(config_path: Path) -> None:
 
 
 def _make_provider(config: Config):
-    """Create the appropriate LLM provider from config.
+    """Create the appropriate LLM provider from config."""
+    from ghostbot.providers.factory import build_provider_or_exit
 
-    Routing is driven by ``ProviderSpec.backend`` in the registry.
-    """
-    from ghostbot.providers.base import GenerationSettings
-    from ghostbot.providers.registry import find_by_name
-
-    model = config.agents.defaults.model
-    provider_name = config.get_provider_name(model)
-    p = config.get_provider(model)
-    spec = find_by_name(provider_name) if provider_name else None
-    backend = spec.backend if spec else "openai_compat"
-
-    # --- validation ---
-    if backend == "azure_openai":
-        if not p or not p.api_key or not p.api_base:
-            console.print("[red]Error: Azure OpenAI requires api_key and api_base.[/red]")
-            console.print("Set them in ~/.ghostbot/config.json under providers.azure_openai section")
-            console.print("Use the model field to specify the deployment name.")
-            raise typer.Exit(1)
-    elif backend == "openai_compat" and not model.startswith("bedrock/"):
-        needs_key = not (p and p.api_key)
-        exempt = spec and (spec.is_oauth or spec.is_local or spec.is_direct)
-        if needs_key and not exempt:
-            console.print("[red]Error: No API key configured.[/red]")
-            console.print("Set one in ~/.ghostbot/config.json under providers section")
-            raise typer.Exit(1)
-
-    # --- instantiation by backend ---
-    if backend == "openai_codex":
-        from ghostbot.providers.openai_codex_provider import OpenAICodexProvider
-
-        provider = OpenAICodexProvider(default_model=model)
-    elif backend == "azure_openai":
-        from ghostbot.providers.azure_openai_provider import AzureOpenAIProvider
-
-        provider = AzureOpenAIProvider(
-            api_key=p.api_key,
-            api_base=p.api_base,
-            default_model=model,
-        )
-    elif backend == "github_copilot":
-        from ghostbot.providers.github_copilot_provider import GitHubCopilotProvider
-        provider = GitHubCopilotProvider(default_model=model)
-    elif backend == "anthropic":
-        from ghostbot.providers.anthropic_provider import AnthropicProvider
-
-        provider = AnthropicProvider(
-            api_key=p.api_key if p and not p.auth_token else None,
-            auth_token=p.auth_token if p else None,
-            api_base=config.get_api_base(model),
-            default_model=model,
-            extra_headers=p.extra_headers if p else None,
-            header_profile=p.header_profile if p else None,
-        )
-    else:
-        from ghostbot.providers.openai_compat_provider import OpenAICompatProvider
-
-        provider = OpenAICompatProvider(
-            api_key=p.api_key if p else None,
-            api_base=config.get_api_base(model),
-            default_model=model,
-            extra_headers=p.extra_headers if p else None,
-            spec=spec,
-        )
-
-    defaults = config.agents.defaults
-    provider.generation = GenerationSettings(
-        temperature=defaults.temperature,
-        max_tokens=defaults.max_tokens,
-        reasoning_effort=defaults.reasoning_effort,
+    return build_provider_or_exit(
+        config,
+        exit_factory=typer.Exit,
+        print_error=console.print,
     )
-    return provider
 
 
 def _load_runtime_config(config: str | None = None, workspace: str | None = None) -> Config:
@@ -537,17 +473,117 @@ def _warn_deprecated_config_keys(config_path: Path | None) -> None:
         )
 
 
-def _migrate_cron_store(config: "Config") -> None:
-    """One-time migration: move legacy global cron store into the workspace."""
-    from ghostbot.config.paths import get_cron_dir
+def _print_eval_run_summary(summary) -> None:
+    run_root = Path(summary.trace_file).parent.parent if getattr(summary, "trace_file", None) else None
+    console.print(f"[green]Run ID:[/green] {summary.run_id}")
+    if run_root:
+        console.print(f"[green]Run root:[/green] {run_root}")
+    console.print(
+        f"[green]Results:[/green] {summary.summary.get('passed', 0)}/{summary.summary.get('total', 0)} passed"
+    )
 
-    legacy_path = get_cron_dir() / "jobs.json"
-    new_path = config.workspace_path / "cron" / "jobs.json"
-    if legacy_path.is_file() and not new_path.exists():
-        new_path.parent.mkdir(parents=True, exist_ok=True)
-        import shutil
 
-        shutil.move(str(legacy_path), str(new_path))
+# ============================================================================
+# Evaluation Commands
+# ============================================================================
+
+
+eval_app = typer.Typer(help="Run dogfooding evaluation suites")
+app.add_typer(eval_app, name="eval")
+
+
+@eval_app.command("list")
+def eval_list(
+    suite: str = typer.Option(..., "--suite", help="Path to eval suite JSON"),
+):
+    """List scenarios in an evaluation suite."""
+    from ghostbot.eval.harness import load_suite
+
+    suite_path = Path(suite).expanduser().resolve()
+    loaded = load_suite(suite_path)
+
+    table = Table(title=f"Eval Suite: {loaded.name}")
+    table.add_column("Scenario", style="cyan")
+    table.add_column("Category")
+    table.add_column("Fixture")
+    table.add_column("Mode")
+
+    for scenario in loaded.scenarios:
+        table.add_row(scenario.id, scenario.category, scenario.fixture, scenario.mode)
+
+    console.print(table)
+
+
+@eval_app.command("run")
+def eval_run(
+    suite: str = typer.Option(..., "--suite", help="Path to eval suite JSON"),
+    out: str = typer.Option(..., "--out", help="Output directory for eval runs"),
+    scenario: list[str] = typer.Option(None, "--scenario", help="Scenario ID to run", show_default=False),
+    workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+):
+    """Run an evaluation suite."""
+    from ghostbot.eval.harness import EvalHarness
+
+    runtime_config = _load_runtime_config(config, workspace)
+    suite_path = Path(suite).expanduser().resolve()
+    out_dir = Path(out).expanduser().resolve()
+    harness = EvalHarness(runtime_config, suite_path=suite_path, out_dir=out_dir)
+    summary = asyncio.run(harness.run(scenario_ids=scenario or None))
+    run_root = out_dir / summary.run_id
+
+    console.print(f"[green]Run ID:[/green] {summary.run_id}")
+    console.print(f"[green]Run root:[/green] {run_root}")
+    console.print(f"[green]Summary:[/green] {run_root / 'summary.md'}")
+    console.print(
+        f"[green]Results:[/green] {summary.summary.get('passed', 0)}/{summary.summary.get('total', 0)} passed"
+    )
+
+
+@eval_app.command("report")
+def eval_report(
+    run: str = typer.Option(..., "--run", help="Path to an eval run directory"),
+):
+    """Render a saved evaluation report."""
+    from ghostbot.eval.report import render_summary_markdown
+    from ghostbot.eval.schema import EvalRunSummary
+
+    run_dir = Path(run).expanduser().resolve()
+    results_path = run_dir / "results.json"
+    if not results_path.exists():
+        console.print(f"[red]Results file not found:[/red] {results_path}")
+        raise typer.Exit(1)
+
+    summary = EvalRunSummary.model_validate_json(results_path.read_text(encoding="utf-8"))
+    markdown = render_summary_markdown(summary)
+    console.print(Markdown(markdown))
+
+
+@eval_app.command("compare")
+def eval_compare(
+    baseline: str = typer.Option(..., "--baseline", help="Path to the baseline eval run directory"),
+    candidate: str = typer.Option(..., "--candidate", help="Path to the candidate eval run directory"),
+):
+    """Compare two saved evaluation runs."""
+    from ghostbot.eval.compare import compare_runs, render_compare_markdown
+    from ghostbot.eval.schema import EvalRunSummary
+
+    baseline_dir = Path(baseline).expanduser().resolve()
+    candidate_dir = Path(candidate).expanduser().resolve()
+    baseline_path = baseline_dir / "results.json"
+    candidate_path = candidate_dir / "results.json"
+
+    if not baseline_path.exists():
+        console.print(f"[red]Baseline results file not found:[/red] {baseline_path}")
+        raise typer.Exit(1)
+    if not candidate_path.exists():
+        console.print(f"[red]Candidate results file not found:[/red] {candidate_path}")
+        raise typer.Exit(1)
+
+    baseline_run = EvalRunSummary.model_validate_json(baseline_path.read_text(encoding="utf-8"))
+    candidate_run = EvalRunSummary.model_validate_json(candidate_path.read_text(encoding="utf-8"))
+    comparison = compare_runs(baseline_run, candidate_run)
+    console.print(Markdown(render_compare_markdown(comparison)))
 
 
 # ============================================================================
@@ -571,11 +607,8 @@ def serve(
         console.print("[red]aiohttp is required. Install with: pip install 'ghostbot-ai[api]'[/red]")
         raise typer.Exit(1)
 
-    from loguru import logger
-    from ghostbot.agent.loop import AgentLoop
     from ghostbot.api.server import create_app
-    from ghostbot.bus.queue import MessageBus
-    from ghostbot.project import ProjectManager
+    from loguru import logger
 
     if verbose:
         logger.enable("ghostbot")
@@ -587,33 +620,9 @@ def serve(
     host = host if host is not None else api_cfg.host
     port = port if port is not None else api_cfg.port
     timeout = timeout if timeout is not None else api_cfg.timeout
-    sync_workspace_templates(runtime_config.workspace_path)
-    bus = MessageBus()
     provider = _make_provider(runtime_config)
-    project_manager = ProjectManager(runtime_config.workspace_path)
-    agent_loop = AgentLoop(
-        bus=bus,
-        provider=provider,
-        workspace=runtime_config.workspace_path,
-        model=runtime_config.agents.defaults.model,
-        max_iterations=runtime_config.agents.defaults.max_tool_iterations,
-        context_window_tokens=runtime_config.agents.defaults.context_window_tokens,
-        context_block_limit=runtime_config.agents.defaults.context_block_limit,
-        approved_plan_context_block_limit=runtime_config.agents.defaults.approved_plan_context_block_limit,
-        max_tool_result_chars=runtime_config.agents.defaults.max_tool_result_chars,
-        provider_retry_mode=runtime_config.agents.defaults.provider_retry_mode,
-        web_config=runtime_config.tools.web,
-        exec_config=runtime_config.tools.exec,
-        restrict_to_workspace=runtime_config.tools.restrict_to_workspace,
-        session_manager=project_manager,
-        mcp_servers=runtime_config.tools.mcp_servers,
-        channels_config=runtime_config.channels,
-        timezone=runtime_config.agents.defaults.timezone,
-        unified_session=runtime_config.agents.defaults.unified_session,
-        disabled_skills=runtime_config.agents.defaults.disabled_skills,
-        session_ttl_minutes=runtime_config.agents.defaults.session_ttl_minutes,
-        planning_config=runtime_config.agents.defaults.planning,
-    )
+    runtime = build_api_runtime(runtime_config, provider)
+    agent_loop = runtime.agent_loop
 
     model_name = runtime_config.agents.defaults.model
     console.print(f"{__logo__} Starting OpenAI-compatible API server")
@@ -655,13 +664,9 @@ def gateway(
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
     """Start the ghostbot gateway."""
-    from ghostbot.agent.loop import AgentLoop
-    from ghostbot.bus.queue import MessageBus
     from ghostbot.channels.manager import ChannelManager
-    from ghostbot.cron.service import CronService
     from ghostbot.cron.types import CronJob
     from ghostbot.heartbeat.service import HeartbeatService
-    from ghostbot.project import ProjectManager
 
     if verbose:
         import logging
@@ -672,44 +677,12 @@ def gateway(
     port = port if port is not None else config.gateway.port
 
     console.print(f"{__logo__} Starting ghostbot gateway version {__version__} on port {port}...")
-    sync_workspace_templates(config.workspace_path)
-    bus = MessageBus()
-    provider = _make_provider(config)
-    project_manager = ProjectManager(config.workspace_path)
-
-    # Preserve existing single-workspace installs, but keep custom workspaces clean.
-    if is_default_workspace(config.workspace_path):
-        _migrate_cron_store(config)
-
-    # Create cron service with workspace-scoped store
-    cron_store_path = config.workspace_path / "cron" / "jobs.json"
-    cron = CronService(cron_store_path)
-
-    # Create agent with cron service
-    agent = AgentLoop(
-        bus=bus,
-        provider=provider,
-        workspace=config.workspace_path,
-        model=config.agents.defaults.model,
-        max_iterations=config.agents.defaults.max_tool_iterations,
-        context_window_tokens=config.agents.defaults.context_window_tokens,
-        web_config=config.tools.web,
-        context_block_limit=config.agents.defaults.context_block_limit,
-        approved_plan_context_block_limit=config.agents.defaults.approved_plan_context_block_limit,
-        max_tool_result_chars=config.agents.defaults.max_tool_result_chars,
-        provider_retry_mode=config.agents.defaults.provider_retry_mode,
-        exec_config=config.tools.exec,
-        cron_service=cron,
-        restrict_to_workspace=config.tools.restrict_to_workspace,
-        session_manager=project_manager,
-        mcp_servers=config.tools.mcp_servers,
-        channels_config=config.channels,
-        timezone=config.agents.defaults.timezone,
-        unified_session=config.agents.defaults.unified_session,
-        disabled_skills=config.agents.defaults.disabled_skills,
-        session_ttl_minutes=config.agents.defaults.session_ttl_minutes,
-        planning_config=config.agents.defaults.planning,
-    )
+    runtime = build_agent_runtime(config, _make_provider(config))
+    bus = runtime.bus
+    provider = runtime.provider
+    cron = runtime.cron_service
+    agent = runtime.agent_loop
+    project_manager = agent.projects
 
     # Set cron callback (needs agent)
     async def on_cron_job(job: CronJob) -> str | None:
@@ -900,76 +873,15 @@ def agent(
     """Interact with the agent directly."""
     from loguru import logger
 
-    from ghostbot.agent.loop import AgentLoop
-    from ghostbot.bus.queue import MessageBus
-    from ghostbot.cron.service import CronService
-
-    config = _load_runtime_config(config, workspace)
-    sync_workspace_templates(config.workspace_path)
-
-    bus = MessageBus()
-    provider = _make_provider(config)
-
-    # Preserve existing single-workspace installs, but keep custom workspaces clean.
-    if is_default_workspace(config.workspace_path):
-        _migrate_cron_store(config)
-
-    # Create cron service with workspace-scoped store
-    cron_store_path = config.workspace_path / "cron" / "jobs.json"
-    cron = CronService(cron_store_path)
+    runtime = build_agent_runtime(config, _make_provider(config))
+    bus = runtime.bus
+    agent_loop = runtime.agent_loop
 
     if logs:
         logger.enable("ghostbot")
     else:
         logger.disable("ghostbot")
 
-
-    # =================================================================
-    # 🚀 新增：在这里“手搓”一个小脑 Provider 并带上名册！
-    # =================================================================
-    fast_prov_config = config.get_fast_provider_config()
-    fast_provider_name = config.get_fast_provider_name()
-    from ghostbot.providers.registry import find_by_name
-    from ghostbot.providers.openai_compat_provider import OpenAICompatProvider
-
-    fast_spec = find_by_name(fast_provider_name) if fast_provider_name else None
-
-    # 组装小脑。如果用户没配 fast_provider，就安全回退（fallback）给主脑 provider
-    if fast_prov_config:
-        fast_provider = OpenAICompatProvider(
-            api_key=fast_prov_config.api_key,
-            api_base=fast_prov_config.api_base,
-            default_model=config.get_effective_fast_model(),
-            spec=fast_spec
-        )
-    else:
-        fast_provider = provider
-
-    agent_loop = AgentLoop(
-        bus=bus,
-        provider=provider,
-        workspace=config.workspace_path,
-        model=config.agents.defaults.model,
-        fast_provider=fast_provider,
-        fast_model=config.get_effective_fast_model(),
-        max_iterations=config.agents.defaults.max_tool_iterations,
-        context_window_tokens=config.agents.defaults.context_window_tokens,
-        web_config=config.tools.web,
-        context_block_limit=config.agents.defaults.context_block_limit,
-        approved_plan_context_block_limit=config.agents.defaults.approved_plan_context_block_limit,
-        max_tool_result_chars=config.agents.defaults.max_tool_result_chars,
-        provider_retry_mode=config.agents.defaults.provider_retry_mode,
-        exec_config=config.tools.exec,
-        cron_service=cron,
-        restrict_to_workspace=config.tools.restrict_to_workspace,
-        mcp_servers=config.tools.mcp_servers,
-        channels_config=config.channels,
-        timezone=config.agents.defaults.timezone,
-        unified_session=config.agents.defaults.unified_session,
-        disabled_skills=config.agents.defaults.disabled_skills,
-        session_ttl_minutes=config.agents.defaults.session_ttl_minutes,
-        planning_config=config.agents.defaults.planning,
-    )
     restart_notice = consume_restart_notice_from_env()
     if restart_notice and should_show_cli_restart_notice(restart_notice, session_id):
         _print_agent_response(

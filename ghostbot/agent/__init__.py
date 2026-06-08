@@ -1,6 +1,11 @@
 """Agent core module."""
 
-from ghostbot.agent.context import ContextBuilder
+from ghostbot.agent.context import (
+    CompressionEvent,
+    ContextBucketSnapshot,
+    ContextBuildSnapshot,
+    ContextBuilder,
+)
 from ghostbot.agent.hook import AgentHook, AgentHookContext, CompositeHook
 from ghostbot.agent.loop import AgentLoop
 from ghostbot.agent.memory import Dream, MemoryStore
@@ -12,6 +17,9 @@ __all__ = [
     "AgentHookContext",
     "AgentLoop",
     "CompositeHook",
+    "CompressionEvent",
+    "ContextBucketSnapshot",
+    "ContextBuildSnapshot",
     "ContextBuilder",
     "Dream",
     "MemoryStore",

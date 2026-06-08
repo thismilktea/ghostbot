@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from unittest.mock import MagicMock
+import json
+from pathlib import Path
 import re
 
 import pytest
@@ -25,6 +27,7 @@ from ghostbot.command.builtin import (
     cmd_plan_load,
     cmd_plan_revise,
     cmd_plan_status,
+    cmd_scan,
     cmd_use,
     plan_approval_interceptor,
 )
@@ -457,7 +460,7 @@ async def test_planning_loop_uses_read_only_tools_and_project_context(tmp_path):
         definition["function"]["name"]
         for definition in provider.calls[0]["tools"]
     }
-    assert {"read_file", "list_dir", "glob", "grep"}.issubset(tool_names)
+    assert {"read_file", "list_dir", "glob", "grep", "find_symbol", "find_callers", "find_callees", "find_related_files"}.issubset(tool_names)
     assert "write_file" not in tool_names
     assert "edit_file" not in tool_names
     assert "exec" not in tool_names
@@ -825,6 +828,7 @@ async def test_use_restores_active_project_path_from_topology(tmp_path):
         "# Project Topology: demo\n> Project Path: D:/demo\n> Mode: Aider-style Repo Map\n",
         encoding="utf-8",
     )
+    (projects_dir / "demo_graph.json").write_text("{}", encoding="utf-8")
     ctx = _ctx(loop, "/use demo")
     ctx.args = "demo"
 
@@ -835,20 +839,259 @@ async def test_use_restores_active_project_path_from_topology(tmp_path):
     assert "D:/demo" in result.content
     assert session.metadata["active_project"] == "demo"
     assert session.metadata["active_project_path"] == "D:/demo"
+    assert session.metadata["active_project_graph"].endswith("demo_graph.json")
+
 
 
 @pytest.mark.asyncio
-async def test_simple_read_only_request_bypasses_auto_planning(tmp_path):
+async def test_scan_persists_graph_path_metadata(tmp_path):
+    loop = AgentLoop(bus=MessageBus(), provider=_Provider(), workspace=tmp_path)
+    project_root = tmp_path / "demo"
+    project_root.mkdir()
+    (project_root / "app.py").write_text(
+        "def helper():\n    return 1\n\n\ndef run():\n    return helper()\n",
+        encoding="utf-8",
+    )
+    ctx = _ctx(loop, f"/scan {project_root}")
+    ctx.args = str(project_root)
+
+    result = await cmd_scan(ctx)
+    project_name = project_root.name
+    project = loop.projects.get_or_create(project_name)
+
+    assert result is not None
+    assert "图谱:" in result.content
+    assert project.metadata["active_project"] == project_name
+    assert project.metadata["active_project_path"] == str(project_root.resolve())
+    graph_path = Path(project.metadata["active_project_graph"])
+    assert graph_path.exists()
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    assert graph["project_name"] == project_name
+    assert any(symbol["name"] == "helper" for symbol in graph["symbols"])
+
+
+
+
+@pytest.mark.asyncio
+async def test_process_direct_exposes_graph_query_tools_after_scan(tmp_path):
     provider = _Provider("answer")
-    loop = AgentLoop(
-        bus=MessageBus(),
-        provider=provider,
-        workspace=tmp_path,
-        planning_config=PlanningConfig(mode="auto"),
+    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path)
+    project_root = tmp_path / "demo"
+    project_root.mkdir()
+    (project_root / "app.py").write_text(
+        "def helper():\n    return 1\n\n\ndef run():\n    return helper()\n",
+        encoding="utf-8",
     )
 
-    result = await loop._process_message(_msg("explain this project"))
+    scan_ctx = _ctx(loop, f"/scan {project_root}")
+    scan_ctx.args = str(project_root)
+    await cmd_scan(scan_ctx)
+
+    result = await loop.process_direct("find the helper symbol")
 
     assert result is not None
     assert result.content == "answer"
-    assert PlanState.from_session(loop.sessions.get_or_create("cli:direct")) is None
+    tool_names = {
+        definition["function"]["name"]
+        for definition in provider.calls[-1]["tools"]
+    }
+    assert {"find_symbol", "find_callers", "find_callees", "find_related_files"}.issubset(tool_names)
+
+
+@pytest.mark.asyncio
+async def test_graph_query_tools_expose_impacted_files(tmp_path):
+    loop = AgentLoop(bus=MessageBus(), provider=_Provider(), workspace=tmp_path)
+    project_root = tmp_path / "demo"
+    project_root.mkdir()
+    (project_root / "app.py").write_text(
+        "def helper():\n    return 1\n\n\ndef run():\n    return helper()\n",
+        encoding="utf-8",
+    )
+    (project_root / "service.py").write_text(
+        "from app import helper\n\n\ndef call_helper():\n    return helper()\n",
+        encoding="utf-8",
+    )
+    (project_root / "worker.py").write_text(
+        "from service import call_helper\n\n\ndef run_worker():\n    return call_helper()\n",
+        encoding="utf-8",
+    )
+
+    scan_ctx = _ctx(loop, f"/scan {project_root}")
+    scan_ctx.args = str(project_root)
+    await cmd_scan(scan_ctx)
+
+    find_impacted_files = loop.tools.get("find_impacted_files")
+
+    assert find_impacted_files is not None
+    assert await find_impacted_files.execute(query="app.py") == (
+        "Found 1 impacted file(s) for 'app.py':\n"
+        "- service.py (score=5.5) — depends on app.py; calls helper in app.py"
+    )
+
+
+@pytest.mark.asyncio
+async def test_graph_query_tools_expose_callers_and_callees(tmp_path):
+    loop = AgentLoop(bus=MessageBus(), provider=_Provider(), workspace=tmp_path)
+    project_root = tmp_path / "demo"
+    project_root.mkdir()
+    (project_root / "app.py").write_text(
+        "def helper():\n    return 1\n\n\ndef run():\n    return helper()\n",
+        encoding="utf-8",
+    )
+    (project_root / "service.py").write_text(
+        "from app import helper\n\n\ndef call_helper():\n    return helper()\n",
+        encoding="utf-8",
+    )
+
+    scan_ctx = _ctx(loop, f"/scan {project_root}")
+    scan_ctx.args = str(project_root)
+    await cmd_scan(scan_ctx)
+
+    find_callers = loop.tools.get("find_callers")
+    find_callees = loop.tools.get("find_callees")
+
+    assert find_callers is not None
+    assert find_callees is not None
+    assert await find_callers.execute(query="helper") == (
+        "Found 2 caller(s) for 'helper':\n"
+        "- app.py -> app.py::helper via helper\n"
+        "- service.py -> app.py::helper via helper"
+    )
+    assert await find_callees.execute(query="helper") == (
+        "Found 1 callee(s) for 'helper':\n"
+        "- app.py -> app.py::helper via helper"
+    )
+
+
+@pytest.mark.asyncio
+async def test_graph_query_tools_use_active_project_metadata(tmp_path):
+    loop = AgentLoop(bus=MessageBus(), provider=_Provider(), workspace=tmp_path)
+    project_root = tmp_path / "demo"
+    project_root.mkdir()
+    (project_root / "app.py").write_text(
+        "def helper():\n    return 1\n\n\ndef run():\n    return helper()\n",
+        encoding="utf-8",
+    )
+
+    scan_ctx = _ctx(loop, f"/scan {project_root}")
+    scan_ctx.args = str(project_root)
+    await cmd_scan(scan_ctx)
+
+    session = loop.sessions.get_or_create("demo")
+    loop._allow_active_project_tools(session)
+
+    find_symbol = loop.tools.get("find_symbol")
+    find_related_files = loop.tools.get("find_related_files")
+
+    assert find_symbol is not None
+    assert find_related_files is not None
+    assert await find_symbol.execute(query="helper") == (
+        "Found 1 symbol match(es) for 'helper':\n"
+        "- helper (method) — app.py"
+    )
+    assert await find_related_files.execute(query="helper") == (
+        "Found 1 related file(s) for 'helper':\n"
+        "- app.py (score=3.0) — defines matching symbol"
+    )
+
+
+@pytest.mark.asyncio
+async def test_priority_bucket_boosts_graph_neighbors(tmp_path):
+    loop = AgentLoop(bus=MessageBus(), provider=_Provider(), workspace=tmp_path)
+    project_root = tmp_path / "demo"
+    project_root.mkdir()
+    (project_root / "app.py").write_text(
+        "def helper():\n    return 1\n\n\ndef run():\n    return helper()\n",
+        encoding="utf-8",
+    )
+    (project_root / "service.py").write_text(
+        "from app import helper\n\n\ndef call_helper():\n    return helper()\n",
+        encoding="utf-8",
+    )
+
+    scan_ctx = _ctx(loop, f"/scan {project_root}")
+    scan_ctx.args = str(project_root)
+    await cmd_scan(scan_ctx)
+
+    session = loop.sessions.get_or_create("demo")
+    session.touch_file("app.py")
+    loop.sessions.save(session)
+
+    bucket = loop._priority_bucket(session)
+
+    assert bucket["app.py"] > bucket["service.py"]
+    assert bucket["service.py"] >= 25.0
+
+
+@pytest.mark.asyncio
+async def test_context_graph_neighbors_expand_active_files(tmp_path):
+    loop = AgentLoop(bus=MessageBus(), provider=_Provider(), workspace=tmp_path)
+    project_root = tmp_path / "demo"
+    project_root.mkdir()
+    (project_root / "app.py").write_text(
+        "def helper():\n    return 1\n\n\ndef run():\n    return helper()\n",
+        encoding="utf-8",
+    )
+    (project_root / "service.py").write_text(
+        "from app import helper\n\n\ndef call_helper():\n    return helper()\n",
+        encoding="utf-8",
+    )
+
+    scan_ctx = _ctx(loop, f"/scan {project_root}")
+    scan_ctx.args = str(project_root)
+    await cmd_scan(scan_ctx)
+
+    session = loop.sessions.get_or_create("demo")
+    session.touch_file("app.py")
+    loop.sessions.save(session)
+
+    neighbors = loop._context_graph_neighbors(session)
+
+    assert "service.py" in neighbors
+    assert any("references app.py" in reason for reason in neighbors["service.py"])
+
+
+@pytest.mark.asyncio
+async def test_context_impacted_files_and_related_tests_expand_active_files(tmp_path):
+    loop = AgentLoop(bus=MessageBus(), provider=_Provider(), workspace=tmp_path)
+    project_root = tmp_path / "demo"
+    project_root.mkdir()
+    (project_root / "app.py").write_text(
+        "def helper():\n    return 1\n\n\ndef run():\n    return helper()\n",
+        encoding="utf-8",
+    )
+    (project_root / "service.py").write_text(
+        "from app import helper\n\n\ndef call_helper():\n    return helper()\n",
+        encoding="utf-8",
+    )
+    tests_dir = project_root / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_app.py").write_text(
+        "from app import helper\n\n\ndef test_helper():\n    assert helper() == 1\n",
+        encoding="utf-8",
+    )
+
+    scan_ctx = _ctx(loop, f"/scan {project_root}")
+    scan_ctx.args = str(project_root)
+    await cmd_scan(scan_ctx)
+
+    session = loop.sessions.get_or_create("demo")
+    session.touch_file("app.py")
+    loop.sessions.save(session)
+
+    analyzer = loop._project_analyzer(session)
+    assert analyzer is not None
+    impacted = loop._context_impacted_files(session)
+    related_tests = loop._related_test_candidates(session)
+    ranked_tests = analyzer.find_related_tests("app.py")
+    bucket = loop._priority_bucket(session)
+
+    assert "service.py" in impacted
+    assert any("depends on app.py" in reason for reason in impacted["service.py"])
+    assert ranked_tests
+    assert ranked_tests[0]["file_path"] == "tests/test_app.py"
+    assert any("name matches app.py" in reason for reason in ranked_tests[0]["reasons"])
+    assert "tests/test_app.py" in related_tests
+    assert any("name matches app.py" in reason for reason in related_tests["tests/test_app.py"])
+    assert bucket["service.py"] >= 35.0
+    assert bucket["tests/test_app.py"] >= 20.0

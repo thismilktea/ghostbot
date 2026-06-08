@@ -1,0 +1,45 @@
+{
+  "key": "eval_scaffold.empty_checkout.001",
+  "name": "eval_scaffold.empty_checkout.001",
+  "path": null,
+  "created_at": "2026-05-26T22:39:19.789211",
+  "updated_at": "2026-05-26T22:39:50.050108",
+  "metadata": {
+    "active_project": "eval_scaffold.empty_checkout.001",
+    "pending_tool_approval": {
+      "id": "call_pV6zEaaAift1UBZ8zOrxqJAu",
+      "tool_call_id": "call_pV6zEaaAift1UBZ8zOrxqJAu",
+      "tool_name": "exec",
+      "arguments": {
+        "command": "python -c \"import os; print(os.getcwd())\"",
+        "timeout": 30,
+        "working_dir": "."
+      },
+      "tool_call": {
+        "id": "call_pV6zEaaAift1UBZ8zOrxqJAu",
+        "type": "function",
+        "function": {
+          "name": "exec",
+          "arguments": "{\"command\": \"python -c \\\"import os; print(os.getcwd())\\\"\", \"timeout\": 30, \"working_dir\": \".\"}"
+        }
+      },
+      "reason": "Shell command requires an approved executable plan",
+      "assistant_message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_pV6zEaaAift1UBZ8zOrxqJAu",
+            "type": "function",
+            "function": {
+              "name": "exec",
+              "arguments": "{\"command\": \"python -c \\\"import os; print(os.getcwd())\\\"\", \"timeout\": 30, \"working_dir\": \".\"}"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "last_consolidated": 0,
+  "active_files": {}
+}

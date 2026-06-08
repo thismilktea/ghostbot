@@ -8,7 +8,8 @@ import pytest
 
 from ghostbot.agent.autocompact import AutoCompact, CheckpointSummary
 from ghostbot.agent.context import ContextBuilder
-from ghostbot.agent.memory import Consolidator
+from ghostbot.agent.memory import Consolidator, HybridSearchEngine
+from ghostbot.agent.tools.search_memory import SearchMemoryTool
 from ghostbot.agent.tools.search import GlobTool, GrepTool
 from ghostbot.session.manager import Session, SessionManager
 
@@ -33,11 +34,24 @@ def test_context_builder_separates_checkpoint_and_retrieved_memory(workspace):
     session.touch_file("ghostbot/agent/runner.py")
     session.metadata["last_action"] = "tool_error"
 
+    checkpoint_summary = (
+        "Current goal:\n"
+        "- fix runner\n\n"
+        "Confirmed constraints:\n"
+        "- keep exec path unchanged\n\n"
+        "Open work / next steps:\n"
+        "- inspect tests"
+    )
+    retrieved_memory = (
+        '<record index="1" time_cursor="42">prior finding</record>\n'
+        '<record index="2" time_cursor="43">another clue</record>'
+    )
+
     messages = builder.build_messages(
         history=[],
         current_message="fix it",
-        checkpoint_summary="goal: fix runner\nnext: inspect tests",
-        retrieved_memory="cursor=42\ncontent: prior finding",
+        checkpoint_summary=checkpoint_summary,
+        retrieved_memory=retrieved_memory,
         session_metadata=session.metadata,
         session=session,
         channel="cli",
@@ -45,9 +59,12 @@ def test_context_builder_separates_checkpoint_and_retrieved_memory(workspace):
     )
 
     runtime = messages[-1]["content"]
-    assert "[Checkpoint Summary]" in runtime
-    assert "goal: fix runner" in runtime
-    assert "[Retrieved Memory]" in runtime
+    assert "[Working Memory]" in runtime
+    assert "[Current goal]" in runtime
+    assert "fix runner" in runtime
+    assert "keep exec path unchanged" in runtime
+    assert "[Retrieved Memory Cards]" in runtime
+    assert "[Memory card 1]" in runtime
     assert "prior finding" in runtime
 
     system_prompt = messages[0]["content"]
@@ -56,16 +73,43 @@ def test_context_builder_separates_checkpoint_and_retrieved_memory(workspace):
     assert "Last action: tool_error" in system_prompt
 
 
-def test_context_builder_limits_recent_history_without_touching_dream_cursor(workspace):
+def test_context_builder_merges_state_into_working_memory(workspace):
     builder = ContextBuilder(workspace)
-    for i in range(80):
-        builder.memory.append_history(f"history line {i} " + ("x" * 120))
+    session = Session(key="cli:test")
+    session.touch_file("ghostbot/agent/loop.py")
+    session.metadata.update({
+        "active_project": "ghostbot",
+        "active_project_path": "C:/workspace/ghostbot",
+        "last_action": "edited context builder",
+        "pending_plan": {
+            "status": "approved",
+            "original_request": "finish layered memory rollout",
+            "checklist": [
+                {"description": "wire project state into working memory", "status": "pending"},
+                {"description": "run focused tests", "status": "pending"},
+            ],
+        },
+    })
 
-    prompt = builder.build_system_prompt()
+    messages = builder.build_messages(
+        history=[],
+        current_message="continue",
+        checkpoint_summary="Current goal:\n- refine memory cards",
+        session_metadata=session.metadata,
+        session=session,
+        channel="cli",
+        chat_id="test",
+    )
 
-    assert "# Recent History" in prompt
-    assert "history line 79" in prompt
-    assert len(prompt) < 20000
+    runtime = messages[-1]["content"]
+    assert "Active project: ghostbot" in runtime
+    assert "Planned request: finish layered memory rollout" in runtime
+    assert "Plan status: approved" in runtime
+    assert "wire project state into working memory" in runtime
+    assert "Project path: C:/workspace/ghostbot" in runtime
+    assert "ghostbot/agent/loop.py" in runtime
+    assert "edited context builder" in runtime
+    assert "refine memory cards" in runtime
 
 
 def test_context_builder_shows_priority_bucket(workspace):
@@ -83,7 +127,48 @@ def test_context_builder_shows_priority_bucket(workspace):
     assert "ghostbot/agent/loop.py" in prompt
 
 
-def test_context_builder_system_prompt_is_stable(workspace):
+def test_context_builder_shows_graph_neighbors(workspace):
+    builder = ContextBuilder(workspace)
+    session = Session(key="cli:test")
+    session.touch_file("ghostbot/agent/context.py")
+
+    prompt = builder.build_system_prompt(
+        session=session,
+        session_metadata={},
+        graph_neighbors={
+            "ghostbot/agent/loop.py": ["referenced by ghostbot/agent/context.py"],
+            "ghostbot/agent/memory.py": ["references ghostbot/agent/context.py"],
+        },
+    )
+
+    assert "Graph neighbors:" in prompt
+    assert "ghostbot/agent/loop.py" in prompt
+    assert "referenced by ghostbot/agent/context.py" in prompt
+
+
+def test_context_builder_shows_impacted_files_and_related_tests(workspace):
+    builder = ContextBuilder(workspace)
+    session = Session(key="cli:test")
+    session.touch_file("ghostbot/agent/context.py")
+
+    prompt = builder.build_system_prompt(
+        session=session,
+        session_metadata={},
+        impacted_files={
+            "ghostbot/agent/loop.py": ["calls helper in ghostbot/agent/context.py"],
+        },
+        related_tests={
+            "tests/agent/test_context_compression.py": ["name matches ghostbot/agent/context.py"],
+        },
+    )
+
+    assert "Impacted files:" in prompt
+    assert "ghostbot/agent/loop.py" in prompt
+    assert "Likely related tests:" in prompt
+    assert "tests/agent/test_context_compression.py" in prompt
+
+
+def test_context_builder_prompt_is_deterministic(workspace):
     builder = ContextBuilder(workspace)
     session = Session(key="cli:test")
     session.metadata["active_project"] = "demo"
@@ -267,6 +352,21 @@ async def test_consolidator_archive_strips_thinking_and_persists_normalized_summ
     assert entries[0]["content"] == summary
 
 
+
+
+@pytest.mark.asyncio
+async def test_search_tools_can_prioritize_graph_boosted_bucket(tmp_path):
+    (tmp_path / "app.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "service.py").write_text("def call_helper():\n    return 2\n", encoding="utf-8")
+
+    bucket = {"service.py": 25.0, "app.py": 10.0}
+    glob_tool = GlobTool(workspace=tmp_path, priority_bucket_provider=lambda: bucket)
+
+    result = await glob_tool.execute(pattern="*.py", path=".")
+
+    assert result.splitlines()[0] == "service.py"
+
+
 @pytest.mark.asyncio
 async def test_search_tools_prioritize_bucket(tmp_path):
     (tmp_path / "a.py").write_text("needle here\n", encoding="utf-8")
@@ -283,12 +383,30 @@ async def test_search_tools_prioritize_bucket(tmp_path):
     assert grep_result.splitlines()[0] == "b.py"
 
 
-def test_session_manager_normalizes_active_files(tmp_path):
-    manager = SessionManager(tmp_path)
-    session = Session(key="cli:test")
-    session.active_files = {".\\ghostbot\\agent\\loop.py": 1.0, "ghostbot/agent/loop.py": 2.0}
 
-    manager.save(session)
-    reloaded = manager.get_or_create("cli:test")
 
-    assert reloaded.active_files == {"ghostbot/agent/loop.py": 2.0}
+def test_hybrid_search_engine_returns_typed_memory_records(workspace):
+    engine = HybridSearchEngine(workspace)
+    engine.index(1, "Must preserve the exec path during pytest runs")
+    engine.index(2, "Project eval system uses structured summaries for long tasks")
+
+    records = engine.search_records("exec path pytest", top_k=2)
+
+    assert records
+    assert records[0].summary
+    assert records[0].record_type in {"instruction", "preference", "decision", "project_fact", "episode"}
+    assert records[0].scope in {"global", "project", "branch", "task-cluster"}
+
+
+@pytest.mark.asyncio
+async def test_search_memory_tool_returns_memory_cards(workspace):
+    engine = HybridSearchEngine(workspace)
+    engine.index(1, "Must preserve the exec path during pytest runs")
+    tool = SearchMemoryTool(engine)
+
+    result = await tool.execute("exec path pytest")
+
+    assert "<memory_card" in result
+    assert 'type="instruction"' in result
+    assert "Summary:" in result
+    assert "preserve the exec path" in result

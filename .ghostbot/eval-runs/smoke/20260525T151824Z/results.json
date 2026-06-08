@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "run_id": "20260525T151824Z",
+  "suite_name": "ghostbot-eval-smoke",
+  "generated_at": "2026-05-25T15:18:26.378290Z",
+  "results": [
+    {
+      "schema_version": 1,
+      "run_id": "20260525T151824Z",
+      "scenario_id": "plan.empty.001",
+      "category": "plan_only",
+      "fixture": "empty",
+      "model": "gpt-5.4 (0.1.5)",
+      "status": "fail",
+      "timing": {
+        "started_at": "2026-05-25T15:18:24.988460Z",
+        "ended_at": "2026-05-25T15:18:26.372805Z",
+        "latency_ms": 1384
+      },
+      "agent": {
+        "stop_reason": "completed",
+        "iterations": 1,
+        "had_injections": false,
+        "pending_approval": null,
+        "final_content": "Error: {'error': {'code': '', 'message': '无权访问 A-特价gpt-plus速刷 分组 (request id: 202605251518294015238788268d9d6CFHDQW40)', 'type': 'new_api_error'}}",
+        "error": null
+      },
+      "usage": {},
+      "tools": {
+        "tools_used": [],
+        "tool_call_count": 0,
+        "redundant_tool_call_count": 0,
+        "failed_tool_call_count": 0,
+        "redundant_calls": []
+      },
+      "files": {
+        "changed_files": [],
+        "added_files": [],
+        "deleted_files": [],
+        "scope_violations": []
+      },
+      "checks": [],
+      "metrics": {
+        "requirement_hit_rate": 0.0,
+        "self_correction_rate": 0.0,
+        "recovery_cost": 0,
+        "check_pass_rate": 0.0
+      },
+      "deterministic": {
+        "passed": false,
+        "failures": [
+          "Missing required phrase: 计划"
+        ]
+      },
+      "judge": {
+        "score": null,
+        "passed": null,
+        "verdict": null,
+        "reasoning": null
+      },
+      "trace_file": "C:\\Users\\45825\\Desktop\\ghostbot\\.ghostbot\\eval-runs\\smoke\\20260525T151824Z\\scenarios\\plan.empty.001.trace.json"
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "passed": 0,
+    "failed": 1,
+    "errors": 0,
+    "pass_rate": 0.0,
+    "latency_p50_ms": 1384,
+    "latency_p90_ms": 1384,
+    "token_p50": 0,
+    "token_p90": 0,
+    "redundant_tool_rate_p50": 0.0,
+    "tool_call_p50": 0,
+    "requirement_hit_rate_p50": 0.0,
+    "self_correction_rate_p50": 0.0,
+    "recovery_cost_p50": 0,
+    "check_pass_rate": 0.0
+  }
+}

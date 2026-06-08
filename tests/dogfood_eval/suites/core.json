@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "name": "ghostbot-eval-core",
+  "description": "Core dogfooding suite for a full-stack shop project fixture.",
+  "defaults": {
+    "max_iterations": 12,
+    "timeout_seconds": 900,
+    "temperature": 0.0
+  },
+  "fixtures": {
+    "shop_project": {
+      "type": "copy",
+      "source": "fixtures/shop_project",
+      "reset": "fresh_copy"
+    },
+    "empty": {
+      "type": "empty",
+      "reset": "fresh"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "plan.shop_improvement.001",
+      "category": "plan_only",
+      "fixture": "shop_project",
+      "mode": "plan_only",
+      "prompt": "请阅读这个全栈商店项目，给出一个简短的后续优化计划，不要修改代码，并在回复中包含优先级、验证、风险。",
+      "expected": {
+        "must_not_modify_files": true,
+        "required_phrases": ["优先级", "验证", "风险"],
+        "acceptance_criteria": ["优先级", "验证", "风险"],
+        "max_tool_calls": 20
+      },
+      "judging": {
+        "rubric": "project_improvement_plan_v1",
+        "min_score": 0.75
+      },
+      "tags": ["shop", "plan"]
+    },
+    {
+      "id": "bugfix.cart_negative_quantity.001",
+      "category": "bugfix",
+      "fixture": "shop_project",
+      "mode": "direct_execute",
+      "prompt": "修复购物车对负数数量缺少校验的问题，并运行 pytest tests/test_cart.py 验证。",
+      "expected": {
+        "required_changed_files": ["shop/cart.py"],
+        "forbidden_changed_files": ["README.md"],
+        "checks": [
+          {
+            "name": "pytest-cart",
+            "command": "python -m pytest tests/test_cart.py"
+          }
+        ],
+        "acceptance_criteria": ["负数数量", "pytest tests/test_cart.py"],
+        "max_tool_calls": 30,
+        "max_changed_files": 3
+      },
+      "judging": {
+        "rubric": "bugfix_execution_v1",
+        "min_score": 0.8
+      },
+      "tags": ["shop", "bugfix", "cart"]
+    },
+    {
+      "id": "tests.cart_regression.001",
+      "category": "test_completion",
+      "fixture": "shop_project",
+      "mode": "direct_execute",
+      "prompt": "为购物车数量边界补充测试，只修改测试文件，并运行 pytest tests/test_cart.py。",
+      "expected": {
+        "allowed_changed_files": ["tests/test_cart.py"],
+        "required_changed_files": ["tests/test_cart.py"],
+        "checks": [
+          {
+            "name": "pytest-cart",
+            "command": "python -m pytest tests/test_cart.py"
+          }
+        ],
+        "acceptance_criteria": ["测试", "pytest tests/test_cart.py"],
+        "max_tool_calls": 24,
+        "max_changed_files": 1
+      },
+      "judging": {
+        "rubric": "test_completion_v1",
+        "min_score": 0.75
+      },
+      "tags": ["shop", "tests"]
+    },
+    {
+      "id": "scaffold.empty_checkout.001",
+      "category": "scaffold",
+      "fixture": "empty",
+      "mode": "direct_execute",
+      "prompt": "在空目录里初始化一个最小的 checkout 模块结构，并说明下一步。",
+      "expected": {
+        "required_phrases": ["下一步"],
+        "acceptance_criteria": ["下一步"],
+        "max_tool_calls": 16
+      },
+      "tags": ["empty", "scaffold"]
+    }
+  ]
+}
